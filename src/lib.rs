@@ -13,8 +13,10 @@ mod records;
 mod shape;
 
 pub use operations::{
-    All, ApplyRule, ArrayChange, Collection, Matching, One, RemoveAt, RemovePosition, ReplaceAt,
-    ReplacePosition, Selection, VecChange, apply, restrict,
+    All, AppendPosition, ApplyRule, ArrayChange, Between, Collection, InsertAllocated,
+    InsertAllocatedKey, InsertAt, InsertPosition, Matching, One, OrderedAddresses, PushBack,
+    RemoveAt, RemoveByKey, RemoveKey, RemovePosition, ReplaceAt, ReplacePosition, Selection,
+    VecChange, apply, restrict,
 };
 pub use records::{IdChange, IdRecord, IdRecords};
 pub use shape::{Addressing, CollectionShape, IdAllocation, IterationOrder, Length, Shape};

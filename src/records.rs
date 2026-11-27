@@ -1,3 +1,4 @@
+use crate::{InsertAllocated, InsertAllocatedKey, RemoveByKey, RemoveKey, apply};
 use serde::{Deserialize, Serialize};
 use std::{
     io,
@@ -129,28 +130,45 @@ impl IdRecords {
     /// Apply an explicit change. Normal execution and WAL replay use this transition.
     pub fn apply(&mut self, change: IdChange<String>) -> io::Result<()> {
         match change {
-            IdChange::Insert { id, text, next_id } => {
-                if id != self.next_id || id.checked_add(1) != Some(next_id) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid insert IDs",
-                    ));
-                }
-                self.records.push(IdRecord { id, text });
-                self.next_id = next_id;
-                Ok(())
-            }
-            IdChange::Delete { id } => {
-                let position = self.position(id).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("record {id} does not exist"),
-                    )
-                })?;
-                self.records.remove(position);
-                Ok(())
-            }
+            IdChange::Insert { id, text, next_id } => apply(
+                self,
+                InsertAllocated {
+                    key: id,
+                    value: text,
+                    next_key: next_id,
+                },
+            ),
+            IdChange::Delete { id } => apply(self, RemoveByKey(id)),
         }
+    }
+}
+
+impl InsertAllocatedKey for IdRecords {
+    type Value = String;
+
+    fn insert_allocated_key(&mut self, id: u64, text: String, next_id: u64) -> io::Result<()> {
+        if id != self.next_id || id.checked_add(1) != Some(next_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid insert IDs",
+            ));
+        }
+        self.records.push(IdRecord { id, text });
+        self.next_id = next_id;
+        Ok(())
+    }
+}
+
+impl RemoveKey for IdRecords {
+    fn remove_key(&mut self, id: u64) -> io::Result<()> {
+        let position = self.position(id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("record {id} does not exist"),
+            )
+        })?;
+        self.records.remove(position);
+        Ok(())
     }
 }
 

@@ -89,6 +89,17 @@ fn main() -> std::io::Result<()> {
 
 A `One` selection over `IdRecords` takes a stable ID and uses binary search. Apply changes in memory, then use the chosen backend to save them when needed.
 
+| Rule | Required capability | Supported collections |
+| --- | --- | --- |
+| `Between(bounds)` | Ascending addresses and direct interval traversal | Vectors, arrays, ID records |
+| `ReplaceAt` | Replace at an existing position, preserving the domain | Vectors, arrays |
+| `PushBack` | Append while preserving existing positions | Vectors |
+| `InsertAt` / `RemoveAt` | Shift positions on insertion or removal | Vectors |
+| `InsertAllocated` | Insert an assigned key and advance its allocation state | ID records |
+| `RemoveByKey` | Remove a unique key while preserving all remaining keys | ID records |
+
+`Between(2..=4)` selects addresses 2 through 4 that exist, keeping their original addresses. `prepare_insert` determines the assigned ID. `InsertAllocated` applies that explicit change during both normal writes and WAL replay. The original change enums delegate to these rules, and their serialized forms remain compatible with existing logs.
+
 ## In memory
 
 ```rust

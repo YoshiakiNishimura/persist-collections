@@ -1,5 +1,8 @@
 use crate::{CollectionShape, IdChange, IdRecord, IdRecords};
-use std::io;
+use std::{
+    io,
+    ops::{Bound, Range, RangeBounds},
+};
 
 /// A collection's addressing domain, ordered traversal, and accepted changes.
 pub trait Collection: CollectionShape {
@@ -31,6 +34,17 @@ pub struct One<K>(pub K);
 /// Select entries for which the predicate accepts the address and value.
 pub struct Matching<P>(pub P);
 
+/// Select an interval of addresses, preserving the original addresses.
+pub struct Between<R>(pub R);
+
+/// Addresses have an ascending order and support direct interval traversal.
+pub trait OrderedAddresses: Collection<Address: Ord> {
+    fn entries_in(
+        &self,
+        bounds: impl RangeBounds<Self::Address>,
+    ) -> impl Iterator<Item = (Self::Address, &Self::Item)>;
+}
+
 impl<C: Collection> Selection<C> for All {
     fn select(self, collection: &C) -> impl Iterator<Item = (C::Address, &C::Item)> {
         collection.entries()
@@ -52,6 +66,12 @@ where
         collection
             .entries()
             .filter(move |&(address, item)| (self.0)(address, item))
+    }
+}
+
+impl<C: OrderedAddresses, R: RangeBounds<C::Address>> Selection<C> for Between<R> {
+    fn select(self, collection: &C) -> impl Iterator<Item = (C::Address, &C::Item)> {
+        collection.entries_in(self.0)
     }
 }
 
@@ -81,6 +101,88 @@ pub trait ReplacePosition: Collection<Address = usize> {
 /// A position can be removed and subsequent positions shift down by one.
 pub trait RemovePosition: Collection<Address = usize> {
     fn remove_position(&mut self, at: usize) -> io::Result<()>;
+}
+
+/// An element can be appended while preserving all existing positions.
+pub trait AppendPosition: Collection<Address = usize> {
+    fn append_position(&mut self, value: Self::Item) -> io::Result<()>;
+}
+
+/// An element can be inserted at a position, shifting that position and later ones.
+pub trait InsertPosition: Collection<Address = usize> {
+    fn insert_position(&mut self, at: usize, value: Self::Item) -> io::Result<()>;
+}
+
+/// An explicit unique key can be removed without changing any remaining keys.
+pub trait RemoveKey: Collection {
+    fn remove_key(&mut self, key: Self::Address) -> io::Result<()>;
+}
+
+/// An already allocated key can be inserted together with its next allocation state.
+pub trait InsertAllocatedKey: Collection {
+    type Value;
+
+    fn insert_allocated_key(
+        &mut self,
+        key: Self::Address,
+        value: Self::Value,
+        next_key: Self::Address,
+    ) -> io::Result<()>;
+}
+
+/// Append a value after the last position.
+pub struct PushBack<T>(pub T);
+
+impl<C: AppendPosition> ApplyRule<C> for PushBack<C::Item> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.append_position(self.0)
+    }
+}
+
+/// Insert a value at a position, shifting existing positions from there onward.
+///
+/// ```compile_fail
+/// use persist_collections::{InsertAt, apply};
+/// let mut array = [1, 2, 3];
+/// apply(&mut array, InsertAt { at: 1, value: 4 }).unwrap();
+/// ```
+pub struct InsertAt<T> {
+    pub at: usize,
+    pub value: T,
+}
+
+impl<C: InsertPosition> ApplyRule<C> for InsertAt<C::Item> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.insert_position(self.at, self.value)
+    }
+}
+
+/// Remove a record at a stable key.
+///
+/// ```compile_fail
+/// use persist_collections::{RemoveByKey, apply};
+/// let mut sequence = vec![1, 2, 3];
+/// apply(&mut sequence, RemoveByKey(1_usize)).unwrap();
+/// ```
+pub struct RemoveByKey<K>(pub K);
+
+impl<C: RemoveKey> ApplyRule<C> for RemoveByKey<C::Address> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.remove_key(self.0)
+    }
+}
+
+/// Add a record using its allocated key and advance the allocation state.
+pub struct InsertAllocated<K, T> {
+    pub key: K,
+    pub value: T,
+    pub next_key: K,
+}
+
+impl<C: InsertAllocatedKey> ApplyRule<C> for InsertAllocated<C::Address, C::Value> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.insert_allocated_key(self.key, self.value, self.next_key)
+    }
 }
 
 /// Replace the value at a position while preserving the collection's domain.
@@ -158,12 +260,33 @@ impl<T> Collection for Vec<T> {
 
     fn apply(&mut self, change: Self::Change) -> io::Result<()> {
         match change {
-            VecChange::Push(value) => self.push(value),
-            VecChange::Insert { at, value } if at <= self.len() => self.insert(at, value),
-            VecChange::Remove { at } => return apply(self, RemoveAt { at }),
-            VecChange::Replace { at, value } => return apply(self, ReplaceAt { at, value }),
-            VecChange::Insert { at, .. } => return Err(invalid_position(at)),
+            VecChange::Push(value) => apply(self, PushBack(value)),
+            VecChange::Insert { at, value } => apply(self, InsertAt { at, value }),
+            VecChange::Remove { at } => apply(self, RemoveAt { at }),
+            VecChange::Replace { at, value } => apply(self, ReplaceAt { at, value }),
         }
+    }
+}
+
+impl<T> OrderedAddresses for Vec<T> {
+    fn entries_in(&self, bounds: impl RangeBounds<usize>) -> impl Iterator<Item = (usize, &T)> {
+        entries_at(self, bounds)
+    }
+}
+
+impl<T> AppendPosition for Vec<T> {
+    fn append_position(&mut self, value: T) -> io::Result<()> {
+        self.push(value);
+        Ok(())
+    }
+}
+
+impl<T> InsertPosition for Vec<T> {
+    fn insert_position(&mut self, at: usize, value: T) -> io::Result<()> {
+        if at > self.len() {
+            return Err(invalid_position(at));
+        }
+        self.insert(at, value);
         Ok(())
     }
 }
@@ -209,6 +332,12 @@ impl<T, const N: usize> ReplacePosition for [T; N] {
     }
 }
 
+impl<T, const N: usize> OrderedAddresses for [T; N] {
+    fn entries_in(&self, bounds: impl RangeBounds<usize>) -> impl Iterator<Item = (usize, &T)> {
+        entries_at(self, bounds)
+    }
+}
+
 impl Collection for IdRecords {
     type Address = u64;
     type Item = IdRecord;
@@ -227,6 +356,38 @@ impl Collection for IdRecords {
     }
 }
 
+impl OrderedAddresses for IdRecords {
+    fn entries_in(&self, bounds: impl RangeBounds<u64>) -> impl Iterator<Item = (u64, &IdRecord)> {
+        self.restrict(bounds)
+            .iter()
+            .map(|record| (record.id(), record))
+    }
+}
+
+fn entries_at<T>(
+    values: &[T],
+    bounds: impl RangeBounds<usize>,
+) -> impl Iterator<Item = (usize, &T)> {
+    let positions = position_interval(values.len(), bounds);
+    positions.clone().zip(values[positions].iter())
+}
+
+fn position_interval(len: usize, bounds: impl RangeBounds<usize>) -> Range<usize> {
+    let start = match bounds.start_bound() {
+        Bound::Included(at) => *at,
+        Bound::Excluded(at) => at.saturating_add(1),
+        Bound::Unbounded => 0,
+    }
+    .min(len);
+    let end = match bounds.end_bound() {
+        Bound::Included(at) => at.saturating_add(1),
+        Bound::Excluded(at) => *at,
+        Bound::Unbounded => len,
+    }
+    .clamp(start, len);
+    start..end
+}
+
 fn replace_at<T>(values: &mut [T], at: usize, value: T) -> io::Result<()> {
     *values.get_mut(at).ok_or_else(|| invalid_position(at))? = value;
     Ok(())
@@ -242,6 +403,61 @@ fn invalid_position(at: usize) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interval_selection_keeps_original_addresses_across_collection_types() -> io::Result<()> {
+        let mut values = vec![10, 20];
+        apply(&mut values, PushBack(40))?;
+        apply(&mut values, InsertAt { at: 2, value: 30 })?;
+        assert!(apply(&mut values, InsertAt { at: 7, value: 1 }).is_err());
+        let slots = [10, 20, 30, 40];
+        assert_eq!(
+            restrict(&values, Between(1..3)).collect::<Vec<_>>(),
+            [(1, &20), (2, &30)]
+        );
+        assert_eq!(
+            restrict(&slots, Between(1..=2)).collect::<Vec<_>>(),
+            [(1, &20), (2, &30)]
+        );
+        assert!(restrict(&slots, Between(usize::MAX..)).next().is_none());
+        assert!(
+            restrict(&slots, Between((Bound::Included(3), Bound::Excluded(1))))
+                .next()
+                .is_none()
+        );
+
+        let mut records = IdRecords::empty();
+        for (key, value) in [(1, "first"), (2, "second"), (3, "third")] {
+            apply(
+                &mut records,
+                InsertAllocated {
+                    key,
+                    value: value.into(),
+                    next_key: key + 1,
+                },
+            )?;
+        }
+        assert!(
+            apply(
+                &mut records,
+                InsertAllocated {
+                    key: 3,
+                    value: "duplicate".into(),
+                    next_key: 4,
+                }
+            )
+            .is_err()
+        );
+        apply(&mut records, RemoveByKey(2))?;
+        assert_eq!(
+            restrict(&records, Between(2..=3))
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        assert_eq!(records.next_id(), 4);
+        Ok(())
+    }
 
     #[test]
     fn the_same_replacement_rule_preserves_the_domain_of_both_sequences() -> io::Result<()> {
