@@ -1,4 +1,4 @@
-#![cfg(all(feature = "json", feature = "msgpack"))]
+#![cfg(all(feature = "json", feature = "msgpack", feature = "postcard"))]
 
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +29,32 @@ fn success(path: &Path, args: &[&str]) -> Vec<u8> {
 
 fn list(path: &Path) -> Value {
     serde_json::from_slice(&success(path, &["list"])).unwrap()
+}
+
+#[test]
+fn postcard_cli_persists_records_and_next_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.postcard");
+    let run_postcard = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_persist-collections"))
+            .args(["--format", "postcard"])
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    assert_eq!(run_postcard(&["insert", "記録"]), b"1\n");
+    let listed: Value = serde_json::from_slice(&run_postcard(&["list"])).unwrap();
+    assert_eq!(listed, json!([{"id": 1, "text": "記録"}]));
+    assert!(!run(&path, &["insert", "wrong format"]).status.success());
+    assert!(run_postcard(&["delete", "1"]).is_empty());
+    assert_eq!(run_postcard(&["insert", "next"]), b"2\n");
 }
 
 #[test]

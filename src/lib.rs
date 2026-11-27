@@ -76,6 +76,49 @@ impl SnapshotFormat for MessagePack {
     }
 }
 
+#[cfg(feature = "postcard")]
+const POSTCARD_HEADER: &[u8; 5] = b"PCSN\x01";
+
+#[cfg(feature = "postcard")]
+/// Postcard snapshot format with a versioned file header.
+pub struct Postcard;
+
+#[cfg(feature = "postcard")]
+/// File backend for Postcard snapshots.
+pub type PostcardSnapshot = FileSnapshot<Postcard>;
+
+#[cfg(feature = "postcard")]
+impl SnapshotFormat for Postcard {
+    fn decode<T: DeserializeOwned>(mut reader: impl Read) -> io::Result<T> {
+        let mut header = [0; POSTCARD_HEADER.len()];
+        reader.read_exact(&mut header)?;
+        if &header != POSTCARD_HEADER {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid Postcard snapshot header or version",
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let (value, remaining) = postcard::take_from_bytes(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if !remaining.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trailing snapshot data",
+            ));
+        }
+        Ok(value)
+    }
+
+    fn encode<T: Serialize + ?Sized>(mut writer: impl Write, data: &T) -> io::Result<()> {
+        writer.write_all(POSTCARD_HEADER)?;
+        postcard::to_io(data, writer).map_err(io::Error::other)?;
+        Ok(())
+    }
+}
+
 /// A backend that can save a collection on demand.
 pub trait Save<C> {
     fn save(&self, data: &C) -> io::Result<()>;

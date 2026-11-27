@@ -1,4 +1,4 @@
-use persist_collections::{FileSnapshot, Json, MessagePack, SnapshotFormat};
+use persist_collections::{FileSnapshot, Json, MessagePack, Postcard, SnapshotFormat};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -8,7 +8,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "Usage: persist-collections [--format json|msgpack] <file> (insert <text> | list | delete <id>)";
+const USAGE: &str = "Usage: persist-collections [--format json|msgpack|postcard] <file> (insert <text> | list | delete <id>)";
 
 #[derive(Deserialize, Serialize)]
 struct Record {
@@ -134,6 +134,7 @@ fn run() -> io::Result<()> {
     match format {
         Some("json") => run_on::<Json>(Path::new(path), command),
         Some("msgpack") => run_on::<MessagePack>(Path::new(path), command),
+        Some("postcard") => run_on::<Postcard>(Path::new(path), command),
         _ => Err(usage_error()),
     }
 }

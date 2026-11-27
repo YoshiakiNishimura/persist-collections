@@ -6,7 +6,7 @@ Choose the data structure, storage backend, and file format separately. `Stored<
 | --- | --- | --- |
 | Data structure | `Vec<T>`, `[T; N]`, and types supported by the selected backend | Pass your own Rust type as `C` |
 | Storage backend | `Memory` and `FileSnapshot<F>` | Implement `Save<C>` and provide your own loading API |
-| Snapshot format | JSON and MessagePack | Implement `SnapshotFormat` |
+| Snapshot format | JSON, MessagePack, and Postcard | Implement `SnapshotFormat` |
 
 ## In memory
 
@@ -50,9 +50,9 @@ Use the `Save<C>` trait and `Stored::with_backend` to add another backend. Loadi
 
 ## Choose a snapshot format
 
-`JsonSnapshot` and `MessagePackSnapshot` provide the same `open_vec`, `open_array`, and `open_value` methods. Both use `FileSnapshot<F>` for file I/O and replacement. Implement `SnapshotFormat` and use `FileSnapshot<YourFormat>` to add a codec. The format and collection types are resolved at compile time.
+`JsonSnapshot`, `MessagePackSnapshot`, and `PostcardSnapshot` provide the same `open_vec`, `open_array`, and `open_value` methods. They share `FileSnapshot<F>` for file I/O and replacement. Implement `SnapshotFormat` and use `FileSnapshot<YourFormat>` to add a codec. The format and collection types are resolved at compile time.
 
-Both codecs are enabled by default. To use the library with MessagePack and without a JSON dependency, specify `default-features = false, features = ["msgpack"]` in Cargo. The CLI requires both features because it offers both formats and prints the list as JSON.
+All three codecs are enabled by default. To use the library with only Postcard, specify `default-features = false, features = ["postcard"]` in Cargo. Postcard payloads use the [Postcard wire format](https://postcard.jamesmunns.com/wire-format) and are prefixed with a file-format version. They require the matching Rust schema on read. Plan a migration when changing the persisted schema. The Postcard decoder buffers the encoded snapshot in memory.
 
 ## Single-collection CLI
 
@@ -70,14 +70,16 @@ cargo run -- records.json list
 
 The CLI stores the next ID and records together in the snapshot. Use a dedicated data path for it. CLI invocations using the same path coordinate through a persistent sidecar, such as `records.json.lock`. Leave that file in place and use a local filesystem with file-lock support. On WSL, keep the data on the Linux filesystem when using multiple invocations concurrently.
 
-JSON is the default file format. To select MessagePack, pass the format on each invocation:
+JSON is the default file format. The CLI builds with all three format features. To select a binary format, pass it on each invocation:
 
 ```sh
 cargo run -- --format msgpack records.msgpack insert "first note"
 cargo run -- --format msgpack records.msgpack list
+cargo run -- --format postcard records.postcard insert "first note"
+cargo run -- --format postcard records.postcard list
 ```
 
-Choose the format when creating a store and use the same selection when reopening it. The CLI still prints `list` as JSON for either file format. Existing JSON files continue to work with the default commands.
+Choose the format when creating a store and use the same selection when reopening it. The CLI prints `list` as JSON for every file format. Existing JSON files continue to work with the default commands.
 
 ## Verify
 
