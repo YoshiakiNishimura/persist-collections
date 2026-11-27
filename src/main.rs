@@ -1,14 +1,14 @@
-use persist_collections::{FileSnapshot, Json, MessagePack, Postcard, SnapshotFormat};
+use persist_collections::{Checked, FileSnapshot, Json, MessagePack, Postcard, SnapshotFormat};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     fs::{File, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
-const USAGE: &str = "Usage: persist-collections [--format json|msgpack|postcard] <file> (insert <text> | list | delete <id>)";
+const USAGE: &str = "Usage: persist-collections [--format json|msgpack|postcard|json-crc32|msgpack-crc32|postcard-crc32] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)";
 
 #[derive(Deserialize, Serialize)]
 struct Record {
@@ -78,6 +78,8 @@ enum Command {
     Insert(String),
     List,
     Delete(u64),
+    Backup(PathBuf),
+    Restore(PathBuf),
 }
 
 fn lock_snapshot(path: &Path) -> io::Result<File> {
@@ -117,6 +119,8 @@ fn run() -> io::Result<()> {
                 .to_owned(),
         ),
         (Some("list"), []) => Command::List,
+        (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
+        (Some("restore"), [source]) => Command::Restore(PathBuf::from(source)),
         (Some("delete"), [id]) => Command::Delete(
             id.to_str()
                 .and_then(|id| id.parse().ok())
@@ -135,11 +139,19 @@ fn run() -> io::Result<()> {
         Some("json") => run_on::<Json>(Path::new(path), command),
         Some("msgpack") => run_on::<MessagePack>(Path::new(path), command),
         Some("postcard") => run_on::<Postcard>(Path::new(path), command),
+        Some("json-crc32") => run_on::<Checked<Json>>(Path::new(path), command),
+        Some("msgpack-crc32") => run_on::<Checked<MessagePack>>(Path::new(path), command),
+        Some("postcard-crc32") => run_on::<Checked<Postcard>>(Path::new(path), command),
         _ => Err(usage_error()),
     }
 }
 
 fn run_on<F: SnapshotFormat>(path: &Path, command: Command) -> io::Result<()> {
+    match command {
+        Command::Backup(destination) => return copy_snapshot::<F>(path, &destination),
+        Command::Restore(source) => return copy_snapshot::<F>(&source, path),
+        _ => {}
+    }
     let snapshot = FileSnapshot::<F>::new(path)?;
     let _lock = lock_snapshot(path)?;
     let mut state = snapshot.open_value(Records::empty())?;
@@ -160,8 +172,19 @@ fn run_on<F: SnapshotFormat>(path: &Path, command: Command) -> io::Result<()> {
             state.get_mut().delete(id)?;
             state.save()?;
         }
+        Command::Backup(_) | Command::Restore(_) => unreachable!(),
     }
     Ok(())
+}
+
+fn copy_snapshot<F: SnapshotFormat>(source: &Path, destination: &Path) -> io::Result<()> {
+    let records: Records = {
+        let _lock = lock_snapshot(source)?;
+        FileSnapshot::<F>::new(source)?.read_value()?
+    };
+    records.validate()?;
+    let _lock = lock_snapshot(destination)?;
+    FileSnapshot::<F>::new(destination)?.create_value(&records)
 }
 
 fn main() -> ExitCode {

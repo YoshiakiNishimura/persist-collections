@@ -31,6 +31,11 @@ pub trait SnapshotFormat {
     fn encode<T: Serialize + ?Sized>(writer: impl Write, data: &T) -> io::Result<()>;
 }
 
+#[cfg(feature = "checksum")]
+mod checksum;
+#[cfg(feature = "checksum")]
+pub use checksum::Checked;
+
 #[cfg(feature = "json")]
 /// JSON snapshot format.
 pub struct Json;
@@ -207,6 +212,21 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
         Ok(Stored::with_backend(data, ValueSnapshot(self)))
     }
 
+    /// Read an existing snapshot. A missing file returns an error.
+    pub fn read_value<T: DeserializeOwned>(&self) -> io::Result<T> {
+        self.load()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("snapshot does not exist: {}", self.path.display()),
+            )
+        })
+    }
+
+    /// Save a value to a new snapshot, failing if the destination already exists.
+    pub fn create_value<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
+        self.write_with(data, false, |_| Ok(()))
+    }
+
     fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
@@ -225,6 +245,15 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
     }
 
     fn write<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
+        self.write_with(data, true, |_| Ok(()))
+    }
+
+    fn write_with<T: Serialize + ?Sized>(
+        &self,
+        data: &T,
+        replace: bool,
+        checkpoint: impl Fn(SavePoint) -> io::Result<()>,
+    ) -> io::Result<()> {
         let parent = self.path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -239,13 +268,31 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
             F::encode(&mut writer, data)?;
             writer.flush()?;
         }
+        checkpoint(SavePoint::Written)?;
         temp.as_file().sync_all()?;
-        temp.persist(&self.path).map_err(|error| error.error)?;
+        checkpoint(SavePoint::FileSynced)?;
+        if replace {
+            temp.persist(&self.path).map_err(|error| error.error)?;
+        } else {
+            temp.persist_noclobber(&self.path)
+                .map_err(|error| error.error)?;
+        }
+        checkpoint(SavePoint::Published)?;
         #[cfg(unix)]
         directory.sync_all()?;
         Ok(())
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SavePoint {
+    Written,
+    FileSynced,
+    Published,
+}
+
+#[cfg(all(test, feature = "json"))]
+mod recovery_tests;
 
 impl<T: Serialize, F: SnapshotFormat> Save<Vec<T>> for FileSnapshot<F> {
     fn save(&self, data: &Vec<T>) -> io::Result<()> {

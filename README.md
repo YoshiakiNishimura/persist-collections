@@ -81,9 +81,27 @@ cargo run -- --format postcard records.postcard list
 
 Choose the format when creating a store and use the same selection when reopening it. The CLI prints `list` as JSON for every file format. Existing JSON files continue to work with the default commands.
 
+## Recovery and backup
+
+The crash tests terminate a child process after writing the temporary file, after syncing it, and after publishing it. The save failure tests inject errors at the same checkpoints. A failure after publication can leave the complete new state visible, so reopen the file before retrying an update. The tests cover process termination and injected failures. Power-loss durability depends on the filesystem and platform. Unix syncs the parent directory after publication.
+
+Create a backup and restore it to a separate path:
+
+```sh
+cargo run -- records.json backup /path/to/backup.json
+cargo run -- recovered.json restore /path/to/backup.json
+cargo run -- recovered.json list
+```
+
+Both commands validate the source, re-encode the CLI records and next ID, and require a new destination path. Restore preserves the records and next ID from the backup, so IDs issued after the backup may be reused in the recovered store. Keep backups on independent storage. To recover a damaged store, open the restored file after checking it and keep the original for diagnosis. Use the same `--format` for backup and restore as for normal operations. Tests include fixed snapshots for the original JSON, MessagePack, and Postcard layouts.
+
+## Optional checksums
+
+Use `FileSnapshot<Checked<YourFormat>>` in Rust or add `-crc32` to a CLI format, such as `--format postcard-crc32`. The wrapper verifies a CRC-32 over the encoded payload before decoding. It detects accidental changes, including altered values that still parse. The wrapper buffers the encoded payload on read and adds a versioned header and checksum on disk. Legacy snapshots use their original format names. CRC-32 provides accidental corruption detection.
+
 ## Verify
 
-Run `cargo test --locked` from the repository root.
+Run `cargo test --locked` from the repository root. GitHub Actions runs the suite on Linux, Windows, and macOS.
 
 ## License
 

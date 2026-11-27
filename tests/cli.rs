@@ -1,4 +1,9 @@
-#![cfg(all(feature = "json", feature = "msgpack", feature = "postcard"))]
+#![cfg(all(
+    feature = "json",
+    feature = "msgpack",
+    feature = "postcard",
+    feature = "checksum"
+))]
 
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +34,83 @@ fn success(path: &Path, args: &[&str]) -> Vec<u8> {
 
 fn list(path: &Path) -> Value {
     serde_json::from_slice(&success(path, &["list"])).unwrap()
+}
+
+#[test]
+fn historical_snapshots_are_readable_and_backups_restore_ids() {
+    // Fixed bytes from the original CLI format layouts, never encoded by this test.
+    let fixtures: [(&str, &[u8]); 3] = [
+        (
+            "json",
+            br#"{"next_id":3,"records":[{"id":2,"text":"kept"}]}"#,
+        ),
+        (
+            "msgpack",
+            b"\x82\xa7next_id\x03\xa7records\x91\x82\xa2id\x02\xa4text\xa4kept",
+        ),
+        ("postcard", b"PCSN\x01\x03\x01\x02\x04kept"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("records");
+    let backup = dir.path().join("backup");
+    let restored = dir.path().join("restored");
+    for (format, bytes) in fixtures {
+        let invoke = |path: &Path, command: &str, argument: Option<&Path>| {
+            Command::new(env!("CARGO_BIN_EXE_persist-collections"))
+                .args(["--format", format])
+                .arg(path)
+                .arg(command)
+                .args(argument)
+                .output()
+                .unwrap()
+        };
+        fs::write(&source, bytes).unwrap();
+        let listed = invoke(&source, "list", None);
+        assert!(listed.status.success(), "{format}: {:?}", listed);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&listed.stdout).unwrap(),
+            json!([{"id": 2, "text": "kept"}])
+        );
+        assert!(invoke(&source, "backup", Some(&backup)).status.success());
+        fs::write(&source, b"broken").unwrap();
+        assert!(!invoke(&source, "backup", Some(&restored)).status.success());
+        assert!(!restored.exists());
+        assert!(!invoke(&source, "restore", Some(&backup)).status.success());
+        assert_eq!(fs::read(&source).unwrap(), b"broken");
+        assert!(invoke(&restored, "restore", Some(&backup)).status.success());
+        assert!(!invoke(&restored, "backup", Some(&backup)).status.success());
+        let inserted = invoke(&restored, "insert", Some(Path::new("new")));
+        assert!(inserted.status.success(), "{:?}", inserted);
+        assert_eq!(inserted.stdout, b"3\n");
+
+        fs::remove_file(&source).unwrap();
+        fs::remove_file(&backup).unwrap();
+        fs::remove_file(&restored).unwrap();
+    }
+}
+
+#[test]
+fn checksummed_postcard_store_can_be_backed_up_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("records");
+    let backup = dir.path().join("backup");
+    let restored = dir.path().join("restored");
+    let run_checked = |path: &Path, command: &str, argument: &Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_persist-collections"))
+            .args(["--format", "postcard-crc32"])
+            .arg(path)
+            .arg(command)
+            .arg(argument)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        output.stdout
+    };
+    assert_eq!(run_checked(&source, "insert", Path::new("kept")), b"1\n");
+    run_checked(&source, "backup", &backup);
+    run_checked(&restored, "restore", &backup);
+    assert_eq!(fs::read(&source).unwrap(), fs::read(&restored).unwrap());
+    assert_eq!(run_checked(&restored, "insert", Path::new("new")), b"2\n");
 }
 
 #[test]
