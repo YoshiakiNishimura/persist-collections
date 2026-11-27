@@ -114,21 +114,24 @@ Choose the format when creating a store and use the same selection when reopenin
 
 ### How an insert is committed
 
-The CLI opens and validates the collection, then builds a one-use `insert_once` function over it. The function reuses `Records::insert` to allocate an ID and stage the row. `and_then` runs the selected backend's existing `save()` only after that succeeds. The CLI prints the ID after save succeeds.
+The CLI opens and validates the collection, then builds a one-use `insert_once` function with a commit function. The function reuses `Records::insert` to allocate an ID and stage the row. After staging succeeds, `and_then` passes the inserted record, the next ID, and the staged state to the commit function. The current adapter calls the selected backend's existing `save()`. The CLI prints the ID after commit succeeds.
 
 ```mermaid
 flowchart TD
     Open["Open and validate collection"] --> Insert["Call insert_once with record"]
     Insert --> Prepare["Records::insert stages the row and allocates an ID"]
     Prepare --> Prepared{"Preparation succeeded?"}
-    Prepared -->|Yes| Save["and_then: commit with the selected backend's save()"]
+    Prepared -->|Yes| Commit["and_then: pass the inserted record, next ID, and staged state to commit"]
     Prepared -->|No| Failure["Return error without printing an ID"]
+    Commit --> Save["Current commit function calls save()"]
     Save --> Saved{"Save succeeded?"}
     Saved -->|Yes| Success["Return and print the allocated ID"]
     Saved -->|No| Failure
 ```
 
 The function owns the staged state for this invocation. If save returns an error, the backend may already have applied the update. Reopen the store and inspect the records before retrying when the outcome is unclear.
+
+For files, the current write and recovery strategy is full snapshot replacement. The commit function is an internal extension point. A future WAL strategy needs both log-based commit and a matching open path that replays the log. The CLI currently selects storage backends and codecs.
 
 ## Share a snapshot through a local daemon
 

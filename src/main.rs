@@ -296,7 +296,7 @@ fn run_records<B: Save<Records>>(
 
     match command {
         Command::Insert(text) => {
-            let id = insert_once(state)(text)?;
+            let id = insert_once(state, commit_snapshot)(text)?;
             writeln!(io::stdout().lock(), "{id}")?;
         }
         Command::List => {
@@ -313,13 +313,31 @@ fn run_records<B: Save<Records>>(
     Ok(())
 }
 
-fn insert_once<B: Save<Records>>(
+// The staged record (including its assigned ID) and the next ID after it.
+type InsertChange<'a> = (&'a Record, u64);
+
+fn insert_once<B>(
     mut state: Stored<Records, B>,
+    commit: impl for<'a> FnOnce(InsertChange<'a>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(String) -> io::Result<u64> {
     move |text| {
         let prepared = state.get_mut().insert(text);
-        prepared.and_then(|id| state.save().map(|()| id))
+        prepared.and_then(|id| {
+            let records = state.get();
+            let inserted = records
+                .records
+                .last()
+                .expect("successful insert appends a record");
+            commit((inserted, records.next_id), &state).map(|()| id)
+        })
     }
+}
+
+fn commit_snapshot<B: Save<Records>>(
+    _change: InsertChange<'_>,
+    staged: &Stored<Records, B>,
+) -> io::Result<()> {
+    staged.save()
 }
 
 fn read_records<F: SnapshotFormat>(source: &Path) -> io::Result<Records> {
@@ -369,18 +387,39 @@ mod tests {
         let saves = Cell::new(0);
         let mut exhausted = Records::empty();
         exhausted.next_id = u64::MAX;
-        let insert = insert_once(Stored::with_backend(exhausted, FailingSave(&saves)));
+        let insert = insert_once(
+            Stored::with_backend(exhausted, FailingSave(&saves)),
+            commit_snapshot,
+        );
         assert_eq!(
             insert("note".into()).unwrap_err().to_string(),
             "record IDs exhausted"
         );
         assert_eq!(saves.get(), 0);
 
-        let insert = insert_once(Stored::with_backend(Records::empty(), FailingSave(&saves)));
+        let insert = insert_once(
+            Stored::with_backend(Records::empty(), FailingSave(&saves)),
+            commit_snapshot,
+        );
         assert_eq!(
             insert("note".into()).unwrap_err().to_string(),
             "save failed"
         );
         assert_eq!(saves.get(), 1);
+    }
+
+    #[test]
+    fn insert_passes_the_allocated_change_to_the_selected_commit_function() {
+        let insert = insert_once(
+            Stored::memory(Records::empty()),
+            |(record, next_id), staged| {
+                assert_eq!(record.id, 1);
+                assert_eq!(record.text, "note");
+                assert_eq!(next_id, 2);
+                assert!(std::ptr::eq(record, &staged.get().records[0]));
+                Ok(())
+            },
+        );
+        assert_eq!(insert("note".into()).unwrap(), 1);
     }
 }

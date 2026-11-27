@@ -57,21 +57,24 @@ cargo run -- records.json list
 
 ### insert の確定フロー
 
-CLIはコレクションを開いて検証し、その状態を持つ1回呼び出し用の関数 `insert_once` を作ります。関数の中では既存の `Records::insert` で行を追加してIDを採番します。追加に成功したときだけ `and_then` で既存の `save()` を呼び、保存を確認できたらIDを出力します。
+CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。既存の `Records::insert` で行を追加してIDを採番し、成功したときだけ `and_then` で採番済みレコード、次のID、準備した状態を確定関数に渡します。現在の確定関数は既存の `save()` を呼び、CLIは成功を確認してからIDを出力します。
 
 ```mermaid
 flowchart TD
     Open["コレクションを開いて検証"] --> Insert["insert_once にレコードを渡す"]
     Insert --> Prepare["Records::insert で追加を準備し、IDを採番"]
     Prepare --> Prepared{"追加の準備に成功？"}
-    Prepared -->|成功| Save["and_then で選択中のバックエンドの save() を呼ぶ"]
+    Prepared -->|成功| Commit["and_then で採番済みレコード・次のID・状態を確定関数に渡す"]
     Prepared -->|失敗| Failure["IDを出力せずエラーを返す"]
+    Commit --> Save["現在の確定関数は save() を呼ぶ"]
     Save --> Saved{"保存に成功？"}
     Saved -->|成功| Success["採番したIDを返して出力する"]
     Saved -->|失敗| Failure
 ```
 
 準備した状態は今回の呼び出しが所有します。`save()` がエラーを返した場合でも、保存先ではすでに反映されていることがあります。結果が不明な場合は、再試行する前に開き直して確認してください。
+
+ファイルの更新・復旧には、現在は全体スナップショットの置換を使います。確定関数は内部の拡張点です。WALを追加する場合は、ログで確定する処理と、ファイルを開くときにログを再生する処理を組み合わせます。現在CLIで選べるのは保存バックエンドと形式です。
 
 ## ファイル形式を選ぶ
 
