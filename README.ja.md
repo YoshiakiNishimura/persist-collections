@@ -211,6 +211,19 @@ cargo run -- --strategy wal --format postcard records-wal insert "2件目のメ�
 
 `checkpoint` は現在の全データと最後の連番を保存します。Unixではチェックポイントと親ディレクトリの同期後にログを回収します。Windowsでは親ディレクトリの同期を行えないためログを残します。チェックポイントは手動で、ログ量に応じて再生時間が長くなります。WALストアの `backup` は論理フルを取得し、`restore` は新しいスナップショットファイルを作ります。途中まで書いたログや、古いログが残ったチェックポイントの復旧をテストしています。実機の電源断は未検証です。
 
+## コピーオンライトB+木
+
+`--strategy cow-btree` は、新しい専用ディレクトリにID順のレコードを保存します。内部ページでIDの範囲を振り分け、葉ページに実データを保持します。`get <id>` は該当する経路を読み、JSONの1件または `null` を返します。`range <最初のID> <最後のID>` は両端を含む範囲に関係するページを読み、ID順のJSON配列を出力します。これらのコマンドはスナップショット・WALでも使えます。
+
+```sh
+mkdir tree-store
+cargo run -- --strategy cow-btree --format postcard tree-store insert "最初のメモ"
+cargo run -- --strategy cow-btree --format postcard tree-store get 1
+cargo run -- --strategy cow-btree --format postcard tree-store range 1 10
+```
+
+更新では変更経路のページを追記・同期してから、新しいルートと次のIDを一緒に確定します。読み取りは確定済みルートから始まります。空になった枝は取り除き、要素が残るページは維持します。初版ではストアロックを使い、古いページを保持します。領域回収とこの方式のCLIバックアップ・復元は今後の範囲です。ルートとページファイルは同じディレクトリに保管してください。
+
 ## ファイル形式を選ぶ
 
 CLIの既定はJSONです。CLIのビルドには、既定で有効になる `json`、`msgpack`、`postcard`、`checksum` のCargo機能が必要です。ファイルの拡張子は保存形式の選択に影響しません。ファイルを開くたびに同じ形式を `--format` で指定してください。`list` の出力形式はどの保存形式でもJSONです。

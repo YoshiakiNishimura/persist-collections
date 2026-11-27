@@ -268,6 +268,19 @@ Each insert or delete writes one checksummed record with a sequence number, then
 
 `checkpoint` publishes the entire current state and its last sequence number. On Unix, the CLI syncs the checkpoint and its directory before reclaiming the log. On Windows, the log is retained because the file backend cannot sync the directory. Checkpoints are manual, so plan for log growth and replay time. The CLI supports logical `backup` from WAL stores and restores it to a new snapshot file. Recovery tests simulate interrupted log writes and an already-published checkpoint with an old log. Physical power-loss recovery remains unverified.
 
+## Copy-on-write B+ tree
+
+Choose `--strategy cow-btree` for a file-backed ordered collection in a new dedicated directory. Internal pages route by ID and leaf pages store records. `get <id>` reads one path and returns a JSON record or `null`. `range <first> <last>` visits the pages intersecting the inclusive interval and streams a JSON array in ID order. The same commands also work with snapshot and WAL stores.
+
+```sh
+mkdir tree-store
+cargo run -- --strategy cow-btree --format postcard tree-store insert "first note"
+cargo run -- --strategy cow-btree --format postcard tree-store get 1
+cargo run -- --strategy cow-btree --format postcard tree-store range 1 10
+```
+
+On update, the tree appends copies of the changed path and syncs the page file, then publishes the new root and next ID together. Readers navigate from the published root. Empty branches can be pruned; partially filled pages are retained. This first implementation uses a store lock and retains old pages. Page space reclamation and CLI backup/restore for this strategy are future work. Keep the root and page file together.
+
 ## Share a snapshot through a local daemon
 
 On Linux, macOS, or WSL, start a daemon in one terminal. Use a new private directory on the local Unix filesystem:

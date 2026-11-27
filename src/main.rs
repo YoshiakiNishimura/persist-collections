@@ -2,28 +2,32 @@
 use persist_collections::SnapshotFormat as BackendFormat;
 #[cfg(unix)]
 use persist_collections::daemon::DaemonFormat as BackendFormat;
-use persist_collections::{All, apply, restrict};
+use persist_collections::{All, Between, One, apply, restrict};
 use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
 };
 use persist_collections::{IdChange as Change, IdRecords as Records};
-use serde::Serializer as _;
+use serde::{Serialize, Serializer as _, ser::SerializeSeq as _};
 use std::{
-    env, fmt,
+    env,
+    ffi::OsStr,
+    fmt,
     fs::{File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
+mod bptree;
 mod wal;
 
 const USAGE: &str = "Usage:
-  persist-collections [--format <format>] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)
-  persist-collections --strategy wal [--format <format>] <directory> (insert <text> | list | delete <id> | checkpoint | backup <new-file>)
+  persist-collections [--format <format>] <file> (insert <text> | list | get <id> | range <first> <last> | delete <id> | backup <new-file> | restore <backup-file>)
+  persist-collections --strategy wal [--format <format>] <directory> (insert <text> | list | get <id> | range <first> <last> | delete <id> | checkpoint | backup <new-file>)
+  persist-collections --strategy cow-btree [--format <format>] <directory> (insert <text> | list | get <id> | range <first> <last> | delete <id>)
   persist-collections daemon serve <socket>
-  persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id> | backup <new-file>)
+  persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | get <id> | range <first> <last> | delete <id> | backup <new-file>)
 Backup and restore accept --backup-format <format> before the file or socket.
 Delete exit codes: 0 deleted, 2 record missing, 3 outcome unknown, 1 other error.
 Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
@@ -31,6 +35,8 @@ Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 enum Command {
     Insert(String),
     List,
+    Get(u64),
+    Range(u64, u64),
     Delete(u64),
     Backup(PathBuf),
     Restore(PathBuf),
@@ -47,6 +53,7 @@ enum Backend {
 enum FileStrategy {
     Snapshot,
     Wal,
+    CowBtree,
 }
 
 fn lock_snapshot(path: &Path) -> io::Result<File> {
@@ -103,6 +110,7 @@ fn run() -> io::Result<()> {
             Some("--backend") => return Err(usage_error()),
             Some("--strategy") if value == "snapshot" => strategy = FileStrategy::Snapshot,
             Some("--strategy") if value == "wal" => strategy = FileStrategy::Wal,
+            Some("--strategy") if value == "cow-btree" => strategy = FileStrategy::CowBtree,
             Some("--strategy") => return Err(usage_error()),
             _ => break,
         }
@@ -123,27 +131,19 @@ fn run() -> io::Result<()> {
                 .to_owned(),
         ),
         (Some("list"), []) => Command::List,
+        (Some("get"), [id]) => Command::Get(parse_id(id)?),
+        (Some("range"), [first, last]) => Command::Range(parse_id(first)?, parse_id(last)?),
         (Some("checkpoint"), []) => Command::Checkpoint,
         (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
         (Some("restore"), [source]) => Command::Restore(PathBuf::from(source)),
-        (Some("delete"), [id]) => Command::Delete(
-            id.to_str()
-                .and_then(|id| id.parse().ok())
-                .filter(|&id| id != 0)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "ID must be a positive 64-bit integer",
-                    )
-                })?,
-        ),
+        (Some("delete"), [id]) => Command::Delete(parse_id(id)?),
         _ => return Err(usage_error()),
     };
 
     if backup_format.is_some() && !matches!(command, Command::Backup(_) | Command::Restore(_)) {
         return Err(usage_error());
     }
-    if (matches!(strategy, FileStrategy::Wal) && matches!(backend, Backend::Daemon))
+    if (!matches!(strategy, FileStrategy::Snapshot) && matches!(backend, Backend::Daemon))
         || (matches!(command, Command::Checkpoint) && !matches!(strategy, FileStrategy::Wal))
     {
         return Err(usage_error());
@@ -161,6 +161,18 @@ fn run() -> io::Result<()> {
     )
 }
 
+fn parse_id(id: &OsStr) -> io::Result<u64> {
+    id.to_str()
+        .and_then(|id| id.parse().ok())
+        .filter(|&id| id != 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ID must be a positive 64-bit integer",
+            )
+        })
+}
+
 fn run_on<F: BackendFormat>(
     backend: Backend,
     strategy: FileStrategy,
@@ -175,8 +187,10 @@ fn run_on<F: BackendFormat>(
         #[cfg(not(unix))]
         return serve_daemon(path);
     }
-    if matches!(strategy, FileStrategy::Wal) {
-        return run_on_wal::<F>(path, command, format, backup_format);
+    match strategy {
+        FileStrategy::Wal => return run_on_wal::<F>(path, command, format, backup_format),
+        FileStrategy::CowBtree => return run_on_bptree::<F>(path, command, format),
+        FileStrategy::Snapshot => {}
     }
     match command {
         Command::Backup(destination) => {
@@ -197,6 +211,70 @@ fn run_on<F: BackendFormat>(
         command,
         commit_snapshot,
     )
+}
+
+fn run_on_bptree<F: SnapshotFormat>(
+    directory: &Path,
+    command: Command,
+    format: &str,
+) -> io::Result<()> {
+    let _lock = lock_snapshot(&directory.join("store"))?;
+    let tree = bptree::Tree::<F>::open(directory, format)?;
+    match command {
+        Command::Insert(text) => writeln!(io::stdout().lock(), "{}", tree.insert(text)?),
+        Command::Get(id) => {
+            let text = tree.get(id)?;
+            write_json(&text.as_deref().map(|text| RecordRef { id, text }))
+        }
+        Command::List => write_tree_range(&tree, 1, u64::MAX),
+        Command::Range(first, last) => write_tree_range(&tree, first, last),
+        Command::Delete(id) => match tree.delete(id) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                DeleteProblem::NotFound(id),
+            )),
+            Err(cause) if save_outcome_unknown(&cause) => {
+                Err(io::Error::other(DeleteProblem::OutcomeUnknown {
+                    id,
+                    cause,
+                }))
+            }
+            Err(cause) => Err(cause),
+        },
+        Command::Backup(_) | Command::Restore(_) | Command::Checkpoint => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this operation is unavailable for the B+ tree strategy",
+        )),
+    }
+}
+
+#[derive(Serialize)]
+struct RecordRef<'a> {
+    id: u64,
+    text: &'a str,
+}
+
+fn write_json(value: &impl Serialize) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value)?;
+    writeln!(stdout)
+}
+
+fn write_tree_range<F: SnapshotFormat>(
+    tree: &bptree::Tree<'_, F>,
+    first: u64,
+    last: u64,
+) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let mut serializer = serde_json::Serializer::new(&mut stdout);
+    let mut sequence = serializer.serialize_seq(None)?;
+    tree.visit(first, last, |id, text| {
+        sequence.serialize_element(&RecordRef { id, text })?;
+        Ok(())
+    })?;
+    sequence.end()?;
+    writeln!(stdout)
 }
 
 fn run_on_wal<F: SnapshotFormat>(
@@ -314,6 +392,20 @@ fn run_records<B>(
             let mut stdout = io::stdout().lock();
             serde_json::Serializer::new(&mut stdout)
                 .collect_seq(restrict(state.get(), All).map(|(_, record)| record))?;
+            writeln!(stdout)?;
+        }
+        Command::Get(id) => {
+            write_json(
+                &restrict(state.get(), One(id))
+                    .next()
+                    .map(|(_, record)| record),
+            )?;
+        }
+        Command::Range(first, last) => {
+            let mut stdout = io::stdout().lock();
+            serde_json::Serializer::new(&mut stdout).collect_seq(
+                restrict(state.get(), Between(first..=last)).map(|(_, record)| record),
+            )?;
             writeln!(stdout)?;
         }
         Command::Delete(id) => {

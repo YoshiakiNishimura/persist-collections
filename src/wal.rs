@@ -54,6 +54,9 @@ impl<'a, F: SnapshotFormat> Wal<'a, F> {
     }
 
     pub(super) fn open(directory: &'a Path, codec: &'a str) -> io::Result<(Self, Records)> {
+        if directory.join("root").try_exists()? {
+            return Err(invalid("directory belongs to a B+ tree store"));
+        }
         let manifest = JsonSnapshot::new(directory.join("format"))?;
         let initialized = match manifest.read_value::<Manifest<String>>() {
             Ok(stored)
