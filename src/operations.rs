@@ -5,7 +5,7 @@ use std::io;
 pub trait Collection: CollectionShape {
     type Address: Copy;
     type Item;
-    type Change;
+    type Change: ApplyRule<Self>;
 
     /// Traverse entries in the order guaranteed by the collection.
     fn entries(&self) -> impl Iterator<Item = (Self::Address, &Self::Item)>;
@@ -63,9 +63,53 @@ pub fn restrict<C: Collection>(
     selection.select(collection)
 }
 
-/// Apply a change to a collection in memory.
-pub fn apply<C: Collection>(collection: &mut C, change: C::Change) -> io::Result<()> {
-    collection.apply(change)
+/// A rule that can be applied to collections meeting its requirements.
+pub trait ApplyRule<C: Collection + ?Sized> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()>;
+}
+
+/// Apply a rule to an eligible collection in memory.
+pub fn apply<C: Collection>(collection: &mut C, rule: impl ApplyRule<C>) -> io::Result<()> {
+    rule.apply_to(collection)
+}
+
+/// Values can be replaced at an existing position, preserving all positions and length.
+pub trait ReplacePosition: Collection<Address = usize> {
+    fn replace_position(&mut self, at: usize, value: Self::Item) -> io::Result<()>;
+}
+
+/// A position can be removed and subsequent positions shift down by one.
+pub trait RemovePosition: Collection<Address = usize> {
+    fn remove_position(&mut self, at: usize) -> io::Result<()>;
+}
+
+/// Replace the value at a position while preserving the collection's domain.
+pub struct ReplaceAt<T> {
+    pub at: usize,
+    pub value: T,
+}
+
+impl<C: ReplacePosition> ApplyRule<C> for ReplaceAt<C::Item> {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.replace_position(self.at, self.value)
+    }
+}
+
+/// Remove an element from a sequence with shifting positions.
+///
+/// ```compile_fail
+/// use persist_collections::{RemoveAt, apply};
+/// let mut array = [1, 2, 3];
+/// apply(&mut array, RemoveAt { at: 1 }).unwrap();
+/// ```
+pub struct RemoveAt {
+    pub at: usize,
+}
+
+impl<C: RemovePosition> ApplyRule<C> for RemoveAt {
+    fn apply_to(self, collection: &mut C) -> io::Result<()> {
+        collection.remove_position(self.at)
+    }
 }
 
 /// Changes to a variable-length positional sequence.
@@ -79,6 +123,24 @@ pub enum VecChange<T> {
 /// A change that preserves the length of a fixed-size array.
 pub enum ArrayChange<T> {
     Replace { at: usize, value: T },
+}
+
+impl<T> ApplyRule<Vec<T>> for VecChange<T> {
+    fn apply_to(self, collection: &mut Vec<T>) -> io::Result<()> {
+        Collection::apply(collection, self)
+    }
+}
+
+impl<T, const N: usize> ApplyRule<[T; N]> for ArrayChange<T> {
+    fn apply_to(self, collection: &mut [T; N]) -> io::Result<()> {
+        Collection::apply(collection, self)
+    }
+}
+
+impl ApplyRule<IdRecords> for IdChange<String> {
+    fn apply_to(self, collection: &mut IdRecords) -> io::Result<()> {
+        IdRecords::apply(collection, self)
+    }
 }
 
 impl<T> Collection for Vec<T> {
@@ -98,14 +160,26 @@ impl<T> Collection for Vec<T> {
         match change {
             VecChange::Push(value) => self.push(value),
             VecChange::Insert { at, value } if at <= self.len() => self.insert(at, value),
-            VecChange::Remove { at } if at < self.len() => {
-                self.remove(at);
-            }
-            VecChange::Replace { at, value } => return replace_at(self, at, value),
-            VecChange::Insert { at, .. } | VecChange::Remove { at } => {
-                return Err(invalid_position(at));
-            }
+            VecChange::Remove { at } => return apply(self, RemoveAt { at }),
+            VecChange::Replace { at, value } => return apply(self, ReplaceAt { at, value }),
+            VecChange::Insert { at, .. } => return Err(invalid_position(at)),
         }
+        Ok(())
+    }
+}
+
+impl<T> ReplacePosition for Vec<T> {
+    fn replace_position(&mut self, at: usize, value: T) -> io::Result<()> {
+        replace_at(self, at, value)
+    }
+}
+
+impl<T> RemovePosition for Vec<T> {
+    fn remove_position(&mut self, at: usize) -> io::Result<()> {
+        if at >= self.len() {
+            return Err(invalid_position(at));
+        }
+        self.remove(at);
         Ok(())
     }
 }
@@ -125,6 +199,12 @@ impl<T, const N: usize> Collection for [T; N] {
 
     fn apply(&mut self, change: Self::Change) -> io::Result<()> {
         let ArrayChange::Replace { at, value } = change;
+        apply(self, ReplaceAt { at, value })
+    }
+}
+
+impl<T, const N: usize> ReplacePosition for [T; N] {
+    fn replace_position(&mut self, at: usize, value: T) -> io::Result<()> {
         replace_at(self, at, value)
     }
 }
@@ -162,6 +242,28 @@ fn invalid_position(at: usize) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_replacement_rule_preserves_the_domain_of_both_sequences() -> io::Result<()> {
+        fn replace_second<C: ReplacePosition<Item = i32>>(values: &mut C) -> io::Result<()> {
+            apply(values, ReplaceAt { at: 1, value: 99 })
+        }
+
+        let mut vector = vec![10, 20, 30];
+        let mut array = [10, 20, 30];
+        replace_second(&mut vector)?;
+        replace_second(&mut array)?;
+        assert_eq!(vector, array);
+        assert_eq!(restrict(&vector, All).count(), 3);
+        assert_eq!(restrict(&array, All).count(), 3);
+        assert!(apply(&mut array, ReplaceAt { at: 3, value: 0 }).is_err());
+        assert_eq!(array, [10, 99, 30]);
+
+        apply(&mut vector, RemoveAt { at: 0 })?;
+        assert_eq!(restrict(&vector, One(0)).next(), Some((0, &99)));
+        assert_eq!(vector, [99, 30]);
+        Ok(())
+    }
 
     #[test]
     fn positional_restrictions_keep_addresses_and_updates_enforce_length() -> io::Result<()> {

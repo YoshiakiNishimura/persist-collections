@@ -68,7 +68,7 @@ fn main() -> std::io::Result<()> {
 `restrict(&collection, selector)` は元の位置やIDと、値への参照を順に返します。`All` は全件、`One(key)` は指定位置・IDの0件または1件、`Matching(predicate)` は条件に合った要素です。条件は列挙しながら評価されます。条件に合う最初の1件だけなら、結果に `.next()` を呼びます。
 
 ```rust
-use persist_collections::{All, ArrayChange, Matching, One, VecChange, apply, restrict};
+use persist_collections::{All, Matching, One, RemoveAt, ReplaceAt, apply, restrict};
 
 fn main() -> std::io::Result<()> {
     let mut values = vec![10, 20, 30];
@@ -77,14 +77,17 @@ fn main() -> std::io::Result<()> {
     let selected = restrict(&values, Matching(|_, value: &i32| *value > 10));
     assert_eq!(selected.map(|(position, _)| position).collect::<Vec<_>>(), [1, 2]);
 
-    apply(&mut values, VecChange::Remove { at: 1 })?;
+    apply(&mut values, ReplaceAt { at: 1, value: 99 })?;
     let mut slots = [10, 20, 30];
-    apply(&mut slots, ArrayChange::Replace { at: 1, value: 99 })?;
+    apply(&mut slots, ReplaceAt { at: 1, value: 99 })?;
+    apply(&mut values, RemoveAt { at: 1 })?;
     Ok(())
 }
 ```
 
-`apply` が受け取る変更の型は、コレクションごとに決まります。`VecChange` は位置を詰める削除などを含み、`ArrayChange` は長さを保つ置換を受け付けます。`IdRecords` には `IdChange` を使い、`One` では位置に代わってIDを指定します。ID指定は二分探索です。`apply` はメモリ上の変更を適用し、保存は選んだバックエンドで別途行えます。
+`apply` に渡せる規則は、コレクションが備える性質で決まります。`ReplaceAt` は `ReplacePosition` を要求し、既存の位置にある値だけを置換して定義域を保ちます。`RemoveAt` は `RemovePosition` を要求し、指定位置を除き、後続の位置を一つ詰めます。`Vec` は両方、固定長配列は置換に対応します。適用できる規則はコンパイル時に決まり、型のメタデータには構造の契約が表れます。既存の `VecChange`、`ArrayChange`、`IdChange` も使えます。
+
+`IdRecords` の `One` は安定したIDを指定し、二分探索で対象を探します。`apply` はメモリ上の変更を適用し、保存は選んだバックエンドで別途行えます。
 
 ## CLIで追加・表示・削除する
 

@@ -68,7 +68,7 @@ Current shape metadata is built in for these three types. It can be read without
 `restrict(&collection, selector)` yields original addresses and borrowed values. `All` traverses every entry, `One(key)` yields zero or one entry, and `Matching(predicate)` filters the ordered traversal lazily. Use `.next()` to take the first match.
 
 ```rust
-use persist_collections::{All, ArrayChange, Matching, One, VecChange, apply, restrict};
+use persist_collections::{All, Matching, One, RemoveAt, ReplaceAt, apply, restrict};
 
 fn main() -> std::io::Result<()> {
     let mut values = vec![10, 20, 30];
@@ -77,14 +77,17 @@ fn main() -> std::io::Result<()> {
     let selected = restrict(&values, Matching(|_, value: &i32| *value > 10));
     assert_eq!(selected.map(|(position, _)| position).collect::<Vec<_>>(), [1, 2]);
 
-    apply(&mut values, VecChange::Remove { at: 1 })?;
+    apply(&mut values, ReplaceAt { at: 1, value: 99 })?;
     let mut slots = [10, 20, 30];
-    apply(&mut slots, ArrayChange::Replace { at: 1, value: 99 })?;
+    apply(&mut slots, ReplaceAt { at: 1, value: 99 })?;
+    apply(&mut values, RemoveAt { at: 1 })?;
     Ok(())
 }
 ```
 
-`apply` accepts the change type for the collection. Vectors can shift positions after removal. Arrays support length-preserving replacement. Use `IdChange` to update `IdRecords`. A `One` selection over `IdRecords` takes a stable ID and uses binary search. Apply changes in memory, then use the chosen backend to save them when needed.
+`apply` accepts rules supported by the collection. `ReplaceAt` requires `ReplacePosition` and changes the value at one existing position while preserving the domain. `RemoveAt` requires `RemovePosition` and removes one position, shifting subsequent positions down. Vectors support both capabilities. Fixed arrays support replacement. These requirements are checked at compile time, and the shape metadata describes the collection's contract. The existing `VecChange`, `ArrayChange`, and `IdChange` types are also accepted.
+
+A `One` selection over `IdRecords` takes a stable ID and uses binary search. Apply changes in memory, then use the chosen backend to save them when needed.
 
 ## In memory
 
