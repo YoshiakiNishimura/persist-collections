@@ -1,4 +1,4 @@
-use persist_collections::JsonSnapshot;
+use persist_collections::{FileSnapshot, Json, MessagePack, SnapshotFormat};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -8,7 +8,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "Usage: persist-collections <file> (insert <text> | list | delete <id>)";
+const USAGE: &str = "Usage: persist-collections [--format json|msgpack] <file> (insert <text> | list | delete <id>)";
 
 #[derive(Deserialize, Serialize)]
 struct Record {
@@ -98,7 +98,11 @@ fn run() -> io::Result<()> {
         return writeln!(io::stdout().lock(), "{USAGE}");
     }
     let usage_error = || io::Error::new(io::ErrorKind::InvalidInput, USAGE);
-    let [path, command, operands @ ..] = args.as_slice() else {
+    let (format, args) = match args.as_slice() {
+        [flag, format, rest @ ..] if flag == "--format" => (format.to_str(), rest),
+        args => (Some("json"), args),
+    };
+    let [path, command, operands @ ..] = args else {
         return Err(usage_error());
     };
     let command = match (command.to_str(), operands) {
@@ -127,9 +131,17 @@ fn run() -> io::Result<()> {
         _ => return Err(usage_error()),
     };
 
-    let path = Path::new(path);
+    match format {
+        Some("json") => run_on::<Json>(Path::new(path), command),
+        Some("msgpack") => run_on::<MessagePack>(Path::new(path), command),
+        _ => Err(usage_error()),
+    }
+}
+
+fn run_on<F: SnapshotFormat>(path: &Path, command: Command) -> io::Result<()> {
+    let snapshot = FileSnapshot::<F>::new(path)?;
     let _lock = lock_snapshot(path)?;
-    let mut state = JsonSnapshot::new(path)?.open_value(Records::empty())?;
+    let mut state = snapshot.open_value(Records::empty())?;
     state.get().validate()?;
 
     match command {

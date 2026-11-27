@@ -1,3 +1,5 @@
+#![cfg(all(feature = "json", feature = "msgpack"))]
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -27,6 +29,46 @@ fn success(path: &Path, args: &[&str]) -> Vec<u8> {
 
 fn list(path: &Path) -> Value {
     serde_json::from_slice(&success(path, &["list"])).unwrap()
+}
+
+#[test]
+fn explicit_messagepack_format_round_trips_and_rejects_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("records.msgpack");
+    let run_binary = |path: &Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_persist-collections"))
+            .args(["--format", "msgpack"])
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let inserted = run_binary(&binary, &["insert", "記録"]);
+    assert!(inserted.status.success(), "{:?}", inserted);
+    assert_eq!(inserted.stdout, b"1\n");
+    let data = fs::read(&binary).unwrap();
+    assert_eq!(data[0], 0x82); // MessagePack map with two fields.
+    assert!(!run(&binary, &["insert", "wrong format"]).status.success());
+    assert_eq!(fs::read(&binary).unwrap(), data);
+    let listed = run_binary(&binary, &["list"]);
+    assert!(listed.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&listed.stdout).unwrap(),
+        json!([{"id": 1, "text": "記録"}])
+    );
+    assert!(run_binary(&binary, &["delete", "1"]).status.success());
+    assert_eq!(run_binary(&binary, &["list"]).stdout, b"[]\n");
+
+    let json = dir.path().join("records.json");
+    success(&json, &["insert", "saved"]);
+    let previous = fs::read(&json).unwrap();
+    assert!(
+        !run_binary(&json, &["insert", "wrong format"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(&json).unwrap(), previous);
 }
 
 #[test]

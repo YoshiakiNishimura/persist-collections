@@ -1,3 +1,5 @@
+#![cfg(feature = "json")]
+
 use persist_collections::{JsonSnapshot, Stored};
 use serde::{Serialize, Serializer, ser::Error as _};
 use std::{fs, io};

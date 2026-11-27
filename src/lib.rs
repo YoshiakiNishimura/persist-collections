@@ -3,7 +3,8 @@
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs::File,
-    io::{self, BufReader, BufWriter, Write},
+    io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 
@@ -16,12 +17,64 @@ pub struct Stored<C, B = Memory> {
 /// A backend that keeps everything in memory.
 pub struct Memory;
 
-/// A backend that writes full JSON snapshots.
-pub struct JsonSnapshot {
+/// A backend that writes full snapshots using format `F`.
+pub struct FileSnapshot<F> {
     path: PathBuf,
+    format: PhantomData<fn() -> F>,
 }
 
-struct JsonValueSnapshot(JsonSnapshot);
+struct ValueSnapshot<F>(FileSnapshot<F>);
+
+/// Encodes and decodes snapshot values. Decoding must consume one complete snapshot.
+pub trait SnapshotFormat {
+    fn decode<T: DeserializeOwned>(reader: impl Read) -> io::Result<T>;
+    fn encode<T: Serialize + ?Sized>(writer: impl Write, data: &T) -> io::Result<()>;
+}
+
+#[cfg(feature = "json")]
+/// JSON snapshot format.
+pub struct Json;
+
+#[cfg(feature = "json")]
+/// File backend for JSON snapshots.
+pub type JsonSnapshot = FileSnapshot<Json>;
+
+#[cfg(feature = "json")]
+impl SnapshotFormat for Json {
+    fn decode<T: DeserializeOwned>(reader: impl Read) -> io::Result<T> {
+        Ok(serde_json::from_reader(reader)?)
+    }
+
+    fn encode<T: Serialize + ?Sized>(writer: impl Write, data: &T) -> io::Result<()> {
+        Ok(serde_json::to_writer(writer, data)?)
+    }
+}
+
+#[cfg(feature = "msgpack")]
+/// MessagePack snapshot format.
+pub struct MessagePack;
+
+#[cfg(feature = "msgpack")]
+/// File backend for MessagePack snapshots.
+pub type MessagePackSnapshot = FileSnapshot<MessagePack>;
+
+#[cfg(feature = "msgpack")]
+impl SnapshotFormat for MessagePack {
+    fn decode<T: DeserializeOwned>(reader: impl Read) -> io::Result<T> {
+        rmp_serde::from_read(reader).map_err(|error| match error {
+            rmp_serde::decode::Error::InvalidMarkerRead(error)
+            | rmp_serde::decode::Error::InvalidDataRead(error) => error,
+            error => io::Error::new(io::ErrorKind::InvalidData, error),
+        })
+    }
+
+    fn encode<T: Serialize + ?Sized>(mut writer: impl Write, data: &T) -> io::Result<()> {
+        rmp_serde::encode::write_named(&mut writer, data).map_err(|error| match error {
+            rmp_serde::encode::Error::InvalidValueWrite(error) => error.into(),
+            error => io::Error::new(io::ErrorKind::InvalidData, error),
+        })
+    }
+}
 
 /// A backend that can save a collection on demand.
 pub trait Save<C> {
@@ -67,11 +120,12 @@ impl<C> Save<C> for Memory {
     }
 }
 
-impl JsonSnapshot {
+impl<F: SnapshotFormat> FileSnapshot<F> {
     /// Bind a snapshot path. Relative paths are resolved against the current directory.
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self {
             path: std::path::absolute(path)?,
+            format: PhantomData,
         })
     }
 
@@ -107,7 +161,7 @@ impl JsonSnapshot {
         fallback: T,
     ) -> io::Result<Stored<T, impl Save<T>>> {
         let data = self.load()?.unwrap_or(fallback);
-        Ok(Stored::with_backend(data, JsonValueSnapshot(self)))
+        Ok(Stored::with_backend(data, ValueSnapshot(self)))
     }
 
     fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
@@ -116,8 +170,15 @@ impl JsonSnapshot {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let values = serde_json::from_reader(BufReader::new(file))?;
-        Ok(Some(values))
+        let mut reader = BufReader::new(file);
+        let value = F::decode(&mut reader)?;
+        if !reader.fill_buf()?.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trailing snapshot data",
+            ));
+        }
+        Ok(Some(value))
     }
 
     fn write<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
@@ -132,7 +193,7 @@ impl JsonSnapshot {
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
         {
             let mut writer = BufWriter::new(temp.as_file_mut());
-            serde_json::to_writer(&mut writer, data)?;
+            F::encode(&mut writer, data)?;
             writer.flush()?;
         }
         temp.as_file().sync_all()?;
@@ -143,19 +204,19 @@ impl JsonSnapshot {
     }
 }
 
-impl<T: Serialize> Save<Vec<T>> for JsonSnapshot {
+impl<T: Serialize, F: SnapshotFormat> Save<Vec<T>> for FileSnapshot<F> {
     fn save(&self, data: &Vec<T>) -> io::Result<()> {
         self.write(data)
     }
 }
 
-impl<T: Serialize, const N: usize> Save<[T; N]> for JsonSnapshot {
+impl<T: Serialize, const N: usize, F: SnapshotFormat> Save<[T; N]> for FileSnapshot<F> {
     fn save(&self, data: &[T; N]) -> io::Result<()> {
         self.write(data.as_slice())
     }
 }
 
-impl<T: Serialize> Save<T> for JsonValueSnapshot {
+impl<T: Serialize, F: SnapshotFormat> Save<T> for ValueSnapshot<F> {
     fn save(&self, data: &T) -> io::Result<()> {
         self.0.write(data)
     }
