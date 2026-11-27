@@ -33,6 +33,36 @@ persist-collections = { git = "https://github.com/YoshiakiNishimura/persist-coll
 
 Pin the `rev` field to a tested commit when you need reproducible dependency versions.
 
+## Collection contracts
+
+`CollectionShape::SHAPE` describes the logical structure of the type:
+
+| Type | Contract | Addressing | Length | Order | Duplicate values |
+| --- | --- | --- | --- | --- | --- |
+| `Vec<T>` | `vec@1` | Position | Variable | Position | Allowed |
+| `[T; N]` | `array@1` | Position | Fixed at `N` | Position | Allowed |
+| `IdRecords` | `id_records@1` | Stable unique ID | Variable | Ascending ID | Allowed |
+
+```rust
+use persist_collections::{CollectionShape, IdRecords, Length};
+
+fn main() -> std::io::Result<()> {
+    assert_eq!(<[u32; 8]>::SHAPE.length, Length::Fixed(8));
+    assert_eq!(IdRecords::SHAPE.family, "id_records");
+    assert_eq!(IdRecords::SHAPE.version, 1);
+
+    let mut records = IdRecords::empty();
+    let change = records.prepare_insert("note".into())?;
+    records.apply(change)?;
+    assert_eq!(records.restrict(1..=1)[0].text(), "note");
+    Ok(())
+}
+```
+
+`restrict` selects within the collection's addressing domain. `apply` takes a change permitted by that collection's contract. For `IdRecords`, the domain is the set of present IDs, and the allocation counter is part of the state. Deletion preserves the counter and other IDs. A published family and version keep their meaning. Array length is a parameter of `array@1`.
+
+Current shape metadata is built in for these three types. It can be read without a collection instance or a codec. The contract version describes logical behavior and is independent from any file format version. The metadata itself lives in the Rust type.
+
 ## In memory
 
 ```rust

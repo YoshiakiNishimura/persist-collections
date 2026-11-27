@@ -6,7 +6,7 @@ use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
 };
-use records::{Applied, Change, Records};
+use persist_collections::{IdChange as Change, IdRecords as Records};
 use std::{
     env, fmt,
     fs::{File, OpenOptions},
@@ -15,7 +15,6 @@ use std::{
     process::ExitCode,
 };
 
-mod records;
 mod wal;
 
 const USAGE: &str = "Usage:
@@ -304,8 +303,6 @@ fn run_records<B>(
     command: Command,
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> io::Result<()> {
-    state.get().validate()?;
-
     match command {
         Command::Insert(text) => {
             let id = insert_once(state, commit)(text)?;
@@ -330,11 +327,9 @@ fn insert_once<B>(
 ) -> impl FnOnce(String) -> io::Result<u64> {
     move |text| {
         let change = state.get().prepare_insert(text)?;
-        apply_once(state, change, commit)
-            .map(|applied| applied.id())
-            .map_err(|error| match error {
-                ApplyOnceError::Apply(cause) | ApplyOnceError::Commit(cause) => cause,
-            })
+        apply_once(state, change, commit).map_err(|error| match error {
+            ApplyOnceError::Apply(cause) | ApplyOnceError::Commit(cause) => cause,
+        })
     }
 }
 
@@ -347,16 +342,34 @@ fn apply_once<B>(
     mut state: Stored<Records, B>,
     change: Change<String>,
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
-) -> Result<Applied, ApplyOnceError> {
+) -> Result<u64, ApplyOnceError> {
+    let (id, next_id) = match change {
+        Change::Insert { id, next_id, .. } => (id, Some(next_id)),
+        Change::Delete { id } => (id, None),
+    };
     state
         .get_mut()
         .apply(change)
         .map_err(ApplyOnceError::Apply)
-        .and_then(|applied| {
-            let change = state.get().applied_change(&applied);
+        .and_then(|()| {
+            let change = match next_id {
+                Some(next_id) => {
+                    let record = state
+                        .get()
+                        .restrict(..)
+                        .last()
+                        .expect("applied insert appends a record");
+                    Change::Insert {
+                        id,
+                        text: record.text(),
+                        next_id,
+                    }
+                }
+                None => Change::Delete { id },
+            };
             commit(change, &state)
                 .map_err(ApplyOnceError::Commit)
-                .map(|()| applied)
+                .map(|()| id)
         })
 }
 
@@ -441,7 +454,6 @@ fn copy_records<F: SnapshotFormat>(
     destination: &Path,
 ) -> io::Result<()> {
     backup_once(source, |records| {
-        records.validate()?;
         let _lock = lock_snapshot(destination)?;
         FileSnapshot::<F>::new(destination)?.create_value(records)
     })
@@ -478,8 +490,8 @@ mod tests {
     impl Save<Records> for FailingSave<'_> {
         fn save(&self, records: &Records) -> io::Result<()> {
             self.0.set(self.0.get() + 1);
-            assert_eq!(records.next_id, 2);
-            assert_eq!(records.restrict(..)[0].id, 1);
+            assert_eq!(records.next_id(), 2);
+            assert_eq!(records.restrict(..)[0].id(), 1);
             Err(io::Error::other("save failed"))
         }
     }
@@ -487,8 +499,9 @@ mod tests {
     #[test]
     fn insert_calls_save_only_after_preparation_and_returns_its_error() {
         let saves = Cell::new(0);
-        let mut exhausted = Records::empty();
-        exhausted.next_id = u64::MAX;
+        let exhausted: Records =
+            serde_json::from_value(serde_json::json!({"next_id": u64::MAX, "records": []}))
+                .unwrap();
         let insert = insert_once(
             Stored::with_backend(exhausted, FailingSave(&saves)),
             commit_snapshot,
@@ -519,10 +532,7 @@ mod tests {
             assert_eq!(id, 1);
             assert_eq!(text, "note");
             assert_eq!(next_id, 2);
-            assert!(std::ptr::eq(
-                text,
-                staged.get().restrict(..)[0].text.as_str()
-            ));
+            assert!(std::ptr::eq(text, staged.get().restrict(..)[0].text()));
             Ok(())
         });
         assert_eq!(insert("note".into()).unwrap(), 1);
@@ -543,7 +553,7 @@ mod tests {
         let delete = delete_once(Stored::memory(records), |change, staged| {
             assert!(matches!(change, Change::Delete { id: 1 }));
             assert!(staged.get().restrict(..).is_empty());
-            assert_eq!(staged.get().next_id, 2);
+            assert_eq!(staged.get().next_id(), 2);
             Ok(())
         });
         assert!(delete(1).is_ok());

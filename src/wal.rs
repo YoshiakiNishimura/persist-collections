@@ -85,7 +85,6 @@ impl<'a, F: SnapshotFormat> Wal<'a, F> {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (0, Records::empty()),
                 Err(error) => return Err(error),
             };
-        records.validate()?;
 
         let log_bytes = match File::open(directory.join(LOG)) {
             Ok(file) => replay::<F>(BufReader::new(file), &mut sequence, &mut records)?,

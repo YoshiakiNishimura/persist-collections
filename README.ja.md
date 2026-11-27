@@ -33,6 +33,36 @@ persist-collections = { git = "https://github.com/YoshiakiNishimura/persist-coll
 
 再現可能な構成にする場合は、検証済みのコミットを `rev` に指定してください。
 
+## コレクションの性質とバージョン
+
+`CollectionShape::SHAPE` で、値を作らずに型の契約を参照できます。
+
+| 型 | 契約 | 要素の指定 | 長さ | 列挙順 | 値の重複 |
+| --- | --- | --- | --- | --- | --- |
+| `Vec<T>` | `vec@1` | 位置 | 可変 | 位置順 | 許す |
+| `[T; N]` | `array@1` | 位置 | `N` に固定 | 位置順 | 許す |
+| `IdRecords` | `id_records@1` | 安定した一意のID | 可変 | IDの昇順 | 許す |
+
+```rust
+use persist_collections::{CollectionShape, IdRecords, Length};
+
+fn main() -> std::io::Result<()> {
+    assert_eq!(<[u32; 8]>::SHAPE.length, Length::Fixed(8));
+    assert_eq!(IdRecords::SHAPE.family, "id_records");
+    assert_eq!(IdRecords::SHAPE.version, 1);
+
+    let mut records = IdRecords::empty();
+    let change = records.prepare_insert("メモ".into())?;
+    records.apply(change)?;
+    assert_eq!(records.restrict(1..=1)[0].text(), "メモ");
+    Ok(())
+}
+```
+
+`restrict` は構造が定めた定義域の一部を選び、`apply` はその構造が許す変更を適用します。`IdRecords` の定義域は存在するIDの集合で、次の採番IDも状態に含みます。削除しても他のIDと次の採番IDは保たれます。一度公開した契約名とバージョンの組み合わせは意味を固定します。配列の長さ `N` は `array@1` の型パラメータです。
+
+現在は上の3型にメタデータを用意しています。契約バージョンは集合の性質を表し、JSON・Postcardなどの保存形式バージョンとは独立しています。メタデータはRustの型から参照できます。
+
 ## CLIで追加・表示・削除する
 
 新しいファイルで、次のコマンドを順に実行します。

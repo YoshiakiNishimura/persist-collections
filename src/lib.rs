@@ -8,6 +8,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod records;
+mod shape;
+
+pub use records::{IdChange, IdRecord, IdRecords};
+pub use shape::{Addressing, CollectionShape, IdAllocation, IterationOrder, Length, Shape};
+
 /// A standard collection paired with a storage backend.
 pub struct Stored<C, B = Memory> {
     data: C,
