@@ -1,5 +1,9 @@
 # persist-collections
 
+[日本語](README.ja.md)
+
+Version 0.1 provides a Rust library and a CLI for a single collection of small records. The CLI supports `insert`, `list`, `delete`, `backup`, and `restore`. Errors are written to standard error and return a nonzero exit status.
+
 Choose the data structure, storage backend, and file format separately. `Stored<C, B>` pairs a value with a backend. Use `get()` and `get_mut()` to access the original Rust type.
 
 | Choice | Built in | Extension point |
@@ -8,36 +12,57 @@ Choose the data structure, storage backend, and file format separately. `Stored<
 | Storage backend | `Memory` and `FileSnapshot<F>` | Implement `Save<C>` and provide your own loading API |
 | Snapshot format | JSON, MessagePack, and Postcard | Implement `SnapshotFormat` |
 
+## Get started
+
+Use a recent stable Rust toolchain with Cargo. The examples were verified with Rust 1.93.1. To try the CLI, clone the repository and run:
+
+```sh
+git clone https://github.com/YoshiakiNishimura/persist-collections.git
+cd persist-collections
+cargo run -- --help
+```
+
+The examples below create files in the current directory. To keep those files outside the checkout, run from a working directory and use `cargo run --manifest-path /path/to/persist-collections/Cargo.toml --` before the CLI arguments.
+
+To use the library in your Rust project, add this entry to your `Cargo.toml`:
+
+```toml
+[dependencies]
+persist-collections = { git = "https://github.com/YoshiakiNishimura/persist-collections.git" }
+```
+
+Pin the `rev` field to a tested commit when you need reproducible dependency versions.
+
 ## In memory
 
 ```rust
 use persist_collections::Stored;
 
-let mut numbers = Stored::memory(vec![1, 2]);
-numbers.get_mut().push(3);
-numbers.save()?; // No-op for the memory backend.
-assert_eq!(numbers.into_inner(), vec![1, 2, 3]);
-# Ok::<(), std::io::Error>(())
+fn main() {
+    let mut numbers = Stored::memory(vec![1, 2]);
+    numbers.get_mut().push(3);
+    assert_eq!(numbers.into_inner(), vec![1, 2, 3]);
+}
 ```
 
 Memory mode accepts elements without Serde traits.
 
 ## JSON snapshots
 
-```rust
-# #[cfg(feature = "json")] {
+Run this example in a working directory with a fresh `slots.json`:
+
+```rust,ignore
 use persist_collections::JsonSnapshot;
 
-let dir = tempfile::tempdir()?;
-let path = dir.path().join("slots.json");
-let mut slots = JsonSnapshot::new(&path)?.open_array([0, 0, 0])?;
-slots.get_mut()[1] = 42;
-slots.save()?;
+fn main() -> std::io::Result<()> {
+    let mut slots = JsonSnapshot::new("slots.json")?.open_array([0, 0, 0])?;
+    slots.get_mut()[1] = 42;
+    slots.save()?;
 
-let reopened = JsonSnapshot::new(&path)?.open_array([0, 0, 0])?;
-assert_eq!(reopened.get(), &[0, 42, 0]);
-# }
-# Ok::<(), std::io::Error>(())
+    let reopened = JsonSnapshot::new("slots.json")?.open_array([0, 0, 0])?;
+    assert_eq!(reopened.get()[1], 42);
+    Ok(())
+}
 ```
 
 For vectors, call `open_vec(vec![1, 2])` with the initial value. Both methods use the initial value when opening the path returns `NotFound`. The first call to `save()` creates the file if its parent directory exists. Malformed JSON, deserialization errors, and a fixed-length array with the wrong number of elements return errors. Opening requires deserializable elements and saving requires serializable elements. The file stores a plain JSON array using Serde's JSON representation.
@@ -46,17 +71,17 @@ Each `save()` writes the entire collection to a temporary file in the same direc
 
 Use the `Save<C>` trait and `Stored::with_backend` to add another backend. Loading is part of the backend's own API.
 
-`open_value` also accepts a Serde type, such as a struct containing a collection and its metadata. The decoder reads directly into that type.
+`open_value` also accepts a Serde type, such as a struct containing a collection and its metadata. The decoder reads directly into that type. To derive the Serde traits for your own types, add `serde = { version = "1", features = ["derive"] }` to your project's dependencies.
 
 ## Choose a snapshot format
 
 `JsonSnapshot`, `MessagePackSnapshot`, and `PostcardSnapshot` provide the same `open_vec`, `open_array`, and `open_value` methods. They share `FileSnapshot<F>` for file I/O and replacement. Implement `SnapshotFormat` and use `FileSnapshot<YourFormat>` to add a codec. The format and collection types are resolved at compile time.
 
-All three codecs are enabled by default. To use the library with only Postcard, specify `default-features = false, features = ["postcard"]` in Cargo. Postcard payloads use the [Postcard wire format](https://postcard.jamesmunns.com/wire-format) and are prefixed with a file-format version. They require the matching Rust schema on read. Plan a migration when changing the persisted schema. The Postcard decoder buffers the encoded snapshot in memory.
+All three codecs and checksum support are enabled by default. To use the library with only Postcard, specify `default-features = false, features = ["postcard"]` in Cargo. Postcard payloads use the [Postcard wire format](https://postcard.jamesmunns.com/wire-format) and are prefixed with a file-format version. They require the matching Rust schema on read. Plan a migration when changing the persisted schema. The Postcard decoder buffers the encoded snapshot in memory.
 
 ## Single-collection CLI
 
-From the repository root, run:
+Start with a fresh data file so the first two records get IDs 1 and 2:
 
 ```sh
 cargo run -- records.json insert "first note"
@@ -68,9 +93,15 @@ cargo run -- records.json list
 
 `insert` prints a numeric ID. `list` prints a JSON array of records in ID order, or `[]` for a missing snapshot. `delete` exits successfully without output and reports an error for a missing ID. Each change saves the full snapshot. IDs survive restarts and are never reused during the lifetime of that snapshot, even after deleting all records.
 
-The CLI stores the next ID and records together in the snapshot. Use a dedicated data path for it. CLI invocations using the same path coordinate through a persistent sidecar, such as `records.json.lock`. Leave that file in place and use a local filesystem with file-lock support. On WSL, keep the data on the Linux filesystem when using multiple invocations concurrently.
+The final `list` prints:
 
-JSON is the default file format. The CLI builds with all three format features. To select a binary format, pass it on each invocation:
+```json
+[{"id":2,"text":"second note"}]
+```
+
+The CLI stores the next ID and records together in the snapshot. Use a dedicated data path for it. CLI invocations using the same path coordinate through an advisory lock on a persistent sidecar, such as `records.json.lock`. Leave that file in place and use a local filesystem with file-lock support. Other tools and library callers must coordinate independently. On WSL, keep concurrent data files on the Linux filesystem rather than under `/mnt/c`.
+
+JSON is the CLI default. Building the CLI requires the `json`, `msgpack`, `postcard`, and `checksum` features, which are enabled by default. The filename extension has no effect on format selection. To select a binary format, pass it on each invocation:
 
 ```sh
 cargo run -- --format msgpack records.msgpack insert "first note"
@@ -88,16 +119,25 @@ The crash tests terminate a child process after writing the temporary file, afte
 Create a backup and restore it to a separate path:
 
 ```sh
-cargo run -- records.json backup /path/to/backup.json
-cargo run -- recovered.json restore /path/to/backup.json
+cargo run -- records.json backup backup.json
+cargo run -- recovered.json restore backup.json
 cargo run -- recovered.json list
 ```
 
-Both commands validate the source, re-encode the CLI records and next ID, and require a new destination path. Restore preserves the records and next ID from the backup, so IDs issued after the backup may be reused in the recovered store. Keep backups on independent storage. To recover a damaged store, open the restored file after checking it and keep the original for diagnosis. Use the same `--format` for backup and restore as for normal operations. Tests include fixed snapshots for the original JSON, MessagePack, and Postcard layouts.
+Both commands lock and validate the source, then lock the destination and write the CLI records and next ID. The destination must be a new file, so choose a fresh filename each time. Restore preserves the records and next ID from the backup, so IDs issued after the backup may be reused in the recovered store. Keep backups on independent storage and retain the damaged file for diagnosis. Use the same `--format` for backup and restore as for normal operations. These commands copy records in one selected format. Tests include fixed snapshots for the original JSON, MessagePack, and Postcard layouts.
 
 ## Optional checksums
 
-Use `FileSnapshot<Checked<YourFormat>>` in Rust or add `-crc32` to a CLI format, such as `--format postcard-crc32`. The wrapper verifies a CRC-32 over the encoded payload before decoding. It detects accidental changes, including altered values that still parse. The wrapper buffers the encoded payload on read and adds a versioned header and checksum on disk. Legacy snapshots use their original format names. CRC-32 provides accidental corruption detection.
+Use `FileSnapshot<Checked<YourFormat>>` in Rust or add `-crc32` to a CLI format, such as `--format postcard-crc32`. The wrapper buffers the encoded payload on read and verifies a CRC-32 before decoding. It can detect accidental changes, including altered values that still parse. The file uses a versioned header and stores the checksum. Open existing unchecked snapshots with their original format names. Use CRC-32 for accidental corruption detection only.
+
+```sh
+cargo run -- --format postcard-crc32 checked.postcard insert "first note"
+cargo run -- --format postcard-crc32 checked.postcard list
+```
+
+## Scope
+
+The CLI manages one collection per file and saves the entire snapshot after each change. It supports standalone insert and delete operations. Multi-operation transactions are outside the current scope. Process termination tests run on Linux, Windows, and macOS. Physical power-loss recovery remains unverified.
 
 ## Verify
 
@@ -105,4 +145,4 @@ Run `cargo test --locked` from the repository root. GitHub Actions runs the suit
 
 ## License
 
-MIT.
+[MIT](LICENSE)
