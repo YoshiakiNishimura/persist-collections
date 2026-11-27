@@ -114,7 +114,7 @@ Choose the format when creating a store and use the same selection when reopenin
 
 ### How an insert is committed
 
-The CLI opens and validates the collection, then builds a one-use `insert_once` function with a commit function. The function reuses `Records::insert` to allocate an ID and stage the row. After staging succeeds, `and_then` passes the inserted record, the next ID, and the staged state to the commit function. The current adapter calls the selected backend's existing `save()`. The CLI prints the ID after commit succeeds.
+The CLI opens and validates the collection, then builds a one-use `insert_once` function with a commit function. The function reuses `Records::insert` to allocate an ID and stage the row. After staging succeeds, `and_then` passes the change and staged state to the commit function. The CLI prints the ID after commit succeeds.
 
 ```mermaid
 flowchart TD
@@ -123,15 +123,32 @@ flowchart TD
     Prepare --> Prepared{"Preparation succeeded?"}
     Prepared -->|Yes| Commit["and_then: pass the inserted record, next ID, and staged state to commit"]
     Prepared -->|No| Failure["Return error without printing an ID"]
-    Commit --> Save["Current commit function calls save()"]
-    Save --> Saved{"Save succeeded?"}
+    Commit --> Strategy{"Selected write path"}
+    Strategy -->|Snapshot or daemon| Save["Call the backend's save()"]
+    Strategy -->|WAL| Log["Append and sync the change record"]
+    Save --> Saved{"Commit succeeded?"}
+    Log --> Saved
     Saved -->|Yes| Success["Return and print the allocated ID"]
     Saved -->|No| Failure
 ```
 
 The function owns the staged state for this invocation. If save returns an error, the backend may already have applied the update. Reopen the store and inspect the records before retrying when the outcome is unclear.
 
-For files, the current write and recovery strategy is full snapshot replacement. The commit function is an internal extension point. A future WAL strategy needs both log-based commit and a matching open path that replays the log. The CLI currently selects storage backends and codecs.
+## Select a file write and recovery strategy
+
+`--strategy snapshot` is the default and writes a full replacement file. `--strategy wal` uses a dedicated directory on a local filesystem. The CLI selects the matching open and commit paths together. The codec is selected independently with `--format` and must match on every subsequent command for that store.
+
+```sh
+mkdir wallet-wal
+cargo run -- --strategy wal --format postcard wallet-wal insert "first note"
+cargo run -- --strategy wal --format postcard wallet-wal list
+cargo run -- --strategy wal --format postcard wallet-wal checkpoint
+cargo run -- --strategy wal --format postcard wallet-wal insert "second note"
+```
+
+Each insert or delete writes one checksummed record with a sequence number, then syncs the log before reporting success. On open, the CLI loads the last checkpoint and replays later entries. Recovery ignores an incomplete final frame and removes it before the next append. A complete frame with a bad checksum or a sequence gap is an error. The directory contains the format metadata, checkpoint, log, and lock file. Keep them together and preserve the lock file.
+
+`checkpoint` publishes the entire current state and its last sequence number. On Unix, the CLI syncs the checkpoint and its directory before reclaiming the log. On Windows, the log is retained because the file backend cannot sync the directory. Checkpoints are manual, so plan for log growth and replay time. The CLI supports logical `backup` from WAL stores and restores it to a new snapshot file. Recovery tests simulate interrupted log writes and an already-published checkpoint with an old log. Physical power-loss recovery remains unverified.
 
 ## Share a snapshot through a local daemon
 

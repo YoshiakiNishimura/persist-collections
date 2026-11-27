@@ -57,7 +57,7 @@ cargo run -- records.json list
 
 ### insert の確定フロー
 
-CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。既存の `Records::insert` で行を追加してIDを採番し、成功したときだけ `and_then` で採番済みレコード、次のID、準備した状態を確定関数に渡します。現在の確定関数は既存の `save()` を呼び、CLIは成功を確認してからIDを出力します。
+CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。既存の `Records::insert` で行を追加してIDを採番し、成功したときだけ `and_then` で変更と準備した状態を確定関数に渡します。CLIは確定に成功してからIDを出力します。
 
 ```mermaid
 flowchart TD
@@ -66,15 +66,32 @@ flowchart TD
     Prepare --> Prepared{"追加の準備に成功？"}
     Prepared -->|成功| Commit["and_then で採番済みレコード・次のID・状態を確定関数に渡す"]
     Prepared -->|失敗| Failure["IDを出力せずエラーを返す"]
-    Commit --> Save["現在の確定関数は save() を呼ぶ"]
-    Save --> Saved{"保存に成功？"}
+    Commit --> Strategy{"選択した方式"}
+    Strategy -->|スナップショット・常駐メモリ| Save["バックエンドの save() を呼ぶ"]
+    Strategy -->|WAL| Log["変更ログを追記して同期"]
+    Save --> Saved{"確定に成功？"}
+    Log --> Saved
     Saved -->|成功| Success["採番したIDを返して出力する"]
     Saved -->|失敗| Failure
 ```
 
 準備した状態は今回の呼び出しが所有します。`save()` がエラーを返した場合でも、保存先ではすでに反映されていることがあります。結果が不明な場合は、再試行する前に開き直して確認してください。
 
-ファイルの更新・復旧には、現在は全体スナップショットの置換を使います。確定関数は内部の拡張点です。WALを追加する場合は、ログで確定する処理と、ファイルを開くときにログを再生する処理を組み合わせます。現在CLIで選べるのは保存バックエンドと形式です。
+## ファイルの更新・復旧方式を選ぶ
+
+既定の `--strategy snapshot` はファイル全体を置き換えます。`--strategy wal` はローカルのファイルシステム上に作った専用ディレクトリを使います。CLIは方式に対応する読み込みと確定処理をセットで選びます。符号化形式は `--format` で指定し、同じストアでは初回と同じ形式を使ってください。
+
+```sh
+mkdir records-wal
+cargo run -- --strategy wal --format postcard records-wal insert "最初のメモ"
+cargo run -- --strategy wal --format postcard records-wal list
+cargo run -- --strategy wal --format postcard records-wal checkpoint
+cargo run -- --strategy wal --format postcard records-wal insert "2件目のメモ"
+```
+
+追加・削除のたびに、連番とチェックサム付きの変更を1件追記し、ログを同期してから成功を返します。開き直すと、最後のチェックポイントを読み、その後の変更を再生します。書きかけの末尾レコードは読み飛ばし、次の追記前に取り除きます。完全なレコードのチェックサム不一致や連番の欠落はエラーになります。形式情報、チェックポイント、ログ、ロックファイルは同じディレクトリに置いたまま使ってください。
+
+`checkpoint` は現在の全データと最後の連番を保存します。Unixではチェックポイントと親ディレクトリの同期後にログを回収します。Windowsでは親ディレクトリの同期を行えないためログを残します。チェックポイントは手動で、ログ量に応じて再生時間が長くなります。WALストアの `backup` は論理フルを取得し、`restore` は新しいスナップショットファイルを作ります。途中まで書いたログや、古いログが残ったチェックポイントの復旧をテストしています。実機の電源断は未検証です。
 
 ## ファイル形式を選ぶ
 

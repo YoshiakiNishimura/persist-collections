@@ -14,8 +14,11 @@ use std::{
     process::ExitCode,
 };
 
+mod wal;
+
 const USAGE: &str = "Usage:
   persist-collections [--format <format>] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)
+  persist-collections --strategy wal [--format <format>] <directory> (insert <text> | list | delete <id> | checkpoint | backup <new-file>)
   persist-collections daemon serve <socket>
   persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id> | backup <new-file>)
 Backup and restore accept --backup-format <format> before the file or socket.
@@ -91,12 +94,25 @@ enum Command {
     Delete(u64),
     Backup(PathBuf),
     Restore(PathBuf),
+    Checkpoint,
+}
+
+#[derive(Serialize, Deserialize)]
+enum Change<T> {
+    Insert { id: u64, text: T, next_id: u64 },
+    Delete { id: u64 },
 }
 
 #[derive(Clone, Copy)]
 enum Backend {
     File,
     Daemon,
+}
+
+#[derive(Clone, Copy)]
+enum FileStrategy {
+    Snapshot,
+    Wal,
 }
 
 fn lock_snapshot(path: &Path) -> io::Result<File> {
@@ -141,6 +157,7 @@ fn run() -> io::Result<()> {
     let mut format = "json";
     let mut backup_format = None;
     let mut backend = Backend::File;
+    let mut strategy = FileStrategy::Snapshot;
     while let [flag, value, rest @ ..] = args {
         match flag.to_str() {
             Some("--format") => format = value.to_str().ok_or_else(usage_error)?,
@@ -150,6 +167,9 @@ fn run() -> io::Result<()> {
             Some("--backend") if value == "file" => backend = Backend::File,
             Some("--backend") if value == "daemon" => backend = Backend::Daemon,
             Some("--backend") => return Err(usage_error()),
+            Some("--strategy") if value == "snapshot" => strategy = FileStrategy::Snapshot,
+            Some("--strategy") if value == "wal" => strategy = FileStrategy::Wal,
+            Some("--strategy") => return Err(usage_error()),
             _ => break,
         }
         args = rest;
@@ -169,6 +189,7 @@ fn run() -> io::Result<()> {
                 .to_owned(),
         ),
         (Some("list"), []) => Command::List,
+        (Some("checkpoint"), []) => Command::Checkpoint,
         (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
         (Some("restore"), [source]) => Command::Restore(PathBuf::from(source)),
         (Some("delete"), [id]) => Command::Delete(
@@ -188,12 +209,19 @@ fn run() -> io::Result<()> {
     if backup_format.is_some() && !matches!(command, Command::Backup(_) | Command::Restore(_)) {
         return Err(usage_error());
     }
+    if (matches!(strategy, FileStrategy::Wal) && matches!(backend, Backend::Daemon))
+        || (matches!(command, Command::Checkpoint) && !matches!(strategy, FileStrategy::Wal))
+    {
+        return Err(usage_error());
+    }
     with_format!(
         format,
         run_on(
             backend,
+            strategy,
             Path::new(path),
             command,
+            format,
             backup_format.unwrap_or(format)
         )
     )
@@ -201,8 +229,10 @@ fn run() -> io::Result<()> {
 
 fn run_on<F: BackendFormat>(
     backend: Backend,
+    strategy: FileStrategy,
     path: &Path,
     command: Command,
+    format: &str,
     backup_format: &str,
 ) -> io::Result<()> {
     if matches!(backend, Backend::Daemon) {
@@ -210,6 +240,9 @@ fn run_on<F: BackendFormat>(
         return run_on_daemon::<F>(path, command, backup_format);
         #[cfg(not(unix))]
         return serve_daemon(path);
+    }
+    if matches!(strategy, FileStrategy::Wal) {
+        return run_on_wal::<F>(path, command, format, backup_format);
     }
     match command {
         Command::Backup(destination) => {
@@ -225,7 +258,52 @@ fn run_on<F: BackendFormat>(
     }
     let snapshot = FileSnapshot::<F>::new(path)?;
     let _lock = lock_snapshot(path)?;
-    run_records(snapshot.open_value(Records::empty())?, command)
+    run_records(
+        snapshot.open_value(Records::empty())?,
+        command,
+        commit_snapshot,
+    )
+}
+
+fn run_on_wal<F: SnapshotFormat>(
+    directory: &Path,
+    command: Command,
+    format: &str,
+    backup_format: &str,
+) -> io::Result<()> {
+    if matches!(command, Command::Restore(_)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "restore requires the snapshot strategy",
+        ));
+    }
+    let lock = lock_snapshot(&directory.join("store"))?;
+    let (wal, records) = wal::Wal::<F>::open(directory, format)?;
+    match command {
+        Command::Checkpoint => wal.checkpoint(&records),
+        Command::Backup(destination) => {
+            if !wal.has_saved_state() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "WAL store has no saved snapshot",
+                ));
+            }
+            let absolute = std::path::absolute(&destination)?;
+            if let Some(parent) = absolute.parent()
+                && parent.canonicalize()? == directory.canonicalize()?
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "write the backup outside the WAL store directory",
+                ));
+            }
+            drop(lock);
+            with_format!(backup_format, copy_records(|| Ok(records), &destination))
+        }
+        command => run_records(Stored::memory(records), command, |change, _| {
+            wal.commit(change)
+        }),
+    }
 }
 
 #[cfg(unix)]
@@ -277,7 +355,7 @@ fn run_on_daemon<F: BackendFormat>(
         _ => {}
     }
     let state = persist_collections::DaemonSnapshot::<F>::open_value(path, Records::empty())?;
-    run_records(state, command)
+    run_records(state, command, commit_snapshot)
 }
 
 #[cfg(not(unix))]
@@ -288,15 +366,16 @@ fn serve_daemon(_path: &Path) -> io::Result<()> {
     ))
 }
 
-fn run_records<B: Save<Records>>(
+fn run_records<B>(
     mut state: Stored<Records, B>,
     command: Command,
+    commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> io::Result<()> {
     state.get().validate()?;
 
     match command {
         Command::Insert(text) => {
-            let id = insert_once(state, commit_snapshot)(text)?;
+            let id = insert_once(state, commit)(text)?;
             writeln!(io::stdout().lock(), "{id}")?;
         }
         Command::List => {
@@ -306,19 +385,16 @@ fn run_records<B: Save<Records>>(
         }
         Command::Delete(id) => {
             state.get_mut().delete(id)?;
-            state.save()?;
+            commit(Change::Delete { id }, &state)?;
         }
-        Command::Backup(_) | Command::Restore(_) => unreachable!(),
+        Command::Backup(_) | Command::Restore(_) | Command::Checkpoint => unreachable!(),
     }
     Ok(())
 }
 
-// The staged record (including its assigned ID) and the next ID after it.
-type InsertChange<'a> = (&'a Record, u64);
-
 fn insert_once<B>(
     mut state: Stored<Records, B>,
-    commit: impl for<'a> FnOnce(InsertChange<'a>, &'a Stored<Records, B>) -> io::Result<()>,
+    commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(String) -> io::Result<u64> {
     move |text| {
         let prepared = state.get_mut().insert(text);
@@ -328,13 +404,18 @@ fn insert_once<B>(
                 .records
                 .last()
                 .expect("successful insert appends a record");
-            commit((inserted, records.next_id), &state).map(|()| id)
+            let change = Change::Insert {
+                id,
+                text: inserted.text.as_str(),
+                next_id: records.next_id,
+            };
+            commit(change, &state).map(|()| id)
         })
     }
 }
 
 fn commit_snapshot<B: Save<Records>>(
-    _change: InsertChange<'_>,
+    _change: Change<&str>,
     staged: &Stored<Records, B>,
 ) -> io::Result<()> {
     staged.save()
@@ -410,16 +491,16 @@ mod tests {
 
     #[test]
     fn insert_passes_the_allocated_change_to_the_selected_commit_function() {
-        let insert = insert_once(
-            Stored::memory(Records::empty()),
-            |(record, next_id), staged| {
-                assert_eq!(record.id, 1);
-                assert_eq!(record.text, "note");
-                assert_eq!(next_id, 2);
-                assert!(std::ptr::eq(record, &staged.get().records[0]));
-                Ok(())
-            },
-        );
+        let insert = insert_once(Stored::memory(Records::empty()), |change, staged| {
+            let Change::Insert { id, text, next_id } = change else {
+                panic!("expected an insert");
+            };
+            assert_eq!(id, 1);
+            assert_eq!(text, "note");
+            assert_eq!(next_id, 2);
+            assert!(std::ptr::eq(text, staged.get().records[0].text.as_str()));
+            Ok(())
+        });
         assert_eq!(insert("note".into()).unwrap(), 1);
     }
 }

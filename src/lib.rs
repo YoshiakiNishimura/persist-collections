@@ -247,6 +247,11 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
         self.write_with(data, false, |_| Ok(()))
     }
 
+    /// Save a complete value, replacing any existing snapshot.
+    pub fn save_value<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
+        self.write(data)
+    }
+
     fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
