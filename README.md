@@ -116,7 +116,7 @@ Choose the format when creating a store and use the same selection when reopenin
 
 ### Function layers
 
-Each arrow points from a caller to the function it invokes. For a normal write, `apply_once` connects the logical operation to the selected commit function. WAL replay passes previously recorded changes directly to `apply`.
+Each arrow points from a caller to the function it invokes. The logical primitives are `restrict` and `apply`. The preparation step, `prepare_insert`, assigns an ID and builds an insert change. For a normal write, `apply_once` connects the logical operation to the selected commit function. WAL replay passes previously recorded changes directly to `apply`.
 
 ```mermaid
 flowchart TD
@@ -132,8 +132,11 @@ flowchart TD
         ApplyOnce["apply_once"]
     end
 
-    subgraph Logical["Logical layer"]
+    subgraph Preparation["Change preparation"]
         Prepare["prepare_insert"]
+    end
+
+    subgraph Logical["Logical layer · collection primitives"]
         Apply["apply"]
         Restrict["restrict"]
     end

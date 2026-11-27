@@ -59,7 +59,7 @@ cargo run -- records.json list
 
 ### 関数のレイヤー
 
-矢印は呼び出し先を示します。通常の更新は `apply_once` が論理操作と確定処理をつなぎ、WAL再生は記録済みの変更を `apply` に直接渡します。
+矢印は呼び出し先を示します。論理層の基本演算は `restrict` と `apply` です。`prepare_insert` は採番して追加の変更を作る準備処理です。通常の更新は `apply_once` が論理操作と確定処理をつなぎ、WAL再生は記録済みの変更を `apply` に直接渡します。
 
 ```mermaid
 flowchart TD
@@ -75,8 +75,11 @@ flowchart TD
         ApplyOnce["apply_once"]
     end
 
-    subgraph Logical["論理層"]
+    subgraph Preparation["変更の準備"]
         Prepare["prepare_insert"]
+    end
+
+    subgraph Logical["論理層 · 集合への基本演算"]
         Apply["apply"]
         Restrict["restrict"]
     end
