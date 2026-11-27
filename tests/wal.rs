@@ -46,12 +46,24 @@ fn wal_replays_changes_and_handles_a_checkpoint_with_its_old_log() {
         assert_eq!(list(path, format), json!([]));
         assert_eq!(success(path, format, &["insert", "first"]), b"1\n");
         assert_eq!(success(path, format, &["insert", "second"]), b"2\n");
+        let before_delete = fs::read(&log).unwrap();
         success(path, format, &["delete", "1"]);
         assert_eq!(list(path, format), json!([{"id":2,"text":"second"}]));
         assert!(!checkpoint.exists());
         let old_log = fs::read(&log).unwrap();
+        assert_eq!(wal(path, format, &["delete", "1"]).status.code(), Some(2));
+        assert_eq!(fs::read(&log).unwrap(), old_log);
         assert!(!old_log.is_empty());
         assert!(!wal(path, "json-crc32", &["list"]).status.success());
+
+        // A torn delete must leave the row present and must not consume an ID.
+        fs::write(&log, &old_log[..old_log.len() - 1]).unwrap();
+        assert_eq!(
+            list(path, format),
+            json!([{"id":1,"text":"first"},{"id":2,"text":"second"}])
+        );
+        assert!(old_log.starts_with(&before_delete));
+        fs::write(&log, &old_log).unwrap();
 
         success(path, format, &["checkpoint"]);
         assert!(checkpoint.is_file());

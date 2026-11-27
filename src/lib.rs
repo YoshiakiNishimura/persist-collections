@@ -136,6 +136,34 @@ pub trait Save<C> {
     fn save(&self, data: &C) -> io::Result<()>;
 }
 
+/// An I/O error after a write may have taken effect.
+///
+/// Reopen and inspect the store before retrying the operation.
+#[derive(Debug)]
+pub struct SaveOutcomeUnknown(io::Error);
+
+impl SaveOutcomeUnknown {
+    pub fn new(error: io::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for SaveOutcomeUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "save outcome unknown. Reopen and inspect the store before retrying ({})",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SaveOutcomeUnknown {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// Capture one complete snapshot and write it to a backup destination.
 ///
 /// The source provides a consistent snapshot. The destination defines how
@@ -294,10 +322,13 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
             temp.persist_noclobber(&self.path)
                 .map_err(|error| error.error)?;
         }
-        checkpoint(SavePoint::Published)?;
-        #[cfg(unix)]
-        directory.sync_all()?;
-        Ok(())
+        let confirm_publication = || -> io::Result<()> {
+            checkpoint(SavePoint::Published)?;
+            #[cfg(unix)]
+            directory.sync_all()?;
+            Ok(())
+        };
+        confirm_publication().map_err(|error| io::Error::other(SaveOutcomeUnknown::new(error)))
     }
 }
 

@@ -3,11 +3,12 @@ use persist_collections::SnapshotFormat as BackendFormat;
 #[cfg(unix)]
 use persist_collections::daemon::DaemonFormat as BackendFormat;
 use persist_collections::{
-    Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SnapshotFormat, Stored, backup_once,
+    Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
+    Stored, backup_once,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
+    env, fmt,
     fs::{File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -22,6 +23,7 @@ const USAGE: &str = "Usage:
   persist-collections daemon serve <socket>
   persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id> | backup <new-file>)
 Backup and restore accept --backup-format <format> before the file or socket.
+Delete exit codes: 0 deleted, 2 record missing, 3 outcome unknown, 1 other error.
 Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 
 #[derive(Deserialize, Serialize)]
@@ -367,7 +369,7 @@ fn serve_daemon(_path: &Path) -> io::Result<()> {
 }
 
 fn run_records<B>(
-    mut state: Stored<Records, B>,
+    state: Stored<Records, B>,
     command: Command,
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> io::Result<()> {
@@ -384,8 +386,7 @@ fn run_records<B>(
             writeln!(stdout)?;
         }
         Command::Delete(id) => {
-            state.get_mut().delete(id)?;
-            commit(Change::Delete { id }, &state)?;
+            delete_once(state, commit)(id)?;
         }
         Command::Backup(_) | Command::Restore(_) | Command::Checkpoint => unreachable!(),
     }
@@ -421,6 +422,75 @@ fn commit_snapshot<B: Save<Records>>(
     staged.save()
 }
 
+#[derive(Debug)]
+enum DeleteProblem {
+    NotFound(u64),
+    OutcomeUnknown { id: u64, cause: io::Error },
+}
+
+impl fmt::Display for DeleteProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(formatter, "record {id} does not exist"),
+            Self::OutcomeUnknown { id, cause } => {
+                write!(
+                    formatter,
+                    "delete outcome unknown for record {id} ({cause})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DeleteProblem {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotFound(_) => None,
+            Self::OutcomeUnknown { cause, .. } => Some(cause),
+        }
+    }
+}
+
+fn delete_once<B>(
+    mut state: Stored<Records, B>,
+    commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
+) -> impl FnOnce(u64) -> io::Result<()> {
+    move |id| {
+        let prepared = state.get_mut().delete(id).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(io::ErrorKind::NotFound, DeleteProblem::NotFound(id))
+            } else {
+                error
+            }
+        });
+        prepared.and_then(|()| {
+            commit(Change::Delete { id }, &state).map_err(|cause| {
+                if save_outcome_unknown(&cause) {
+                    io::Error::other(DeleteProblem::OutcomeUnknown { id, cause })
+                } else {
+                    cause
+                }
+            })
+        })
+    }
+}
+
+fn save_outcome_unknown(error: &io::Error) -> bool {
+    let Some(cause) = error.get_ref() else {
+        return false;
+    };
+    #[cfg(unix)]
+    if matches!(
+        cause.downcast_ref::<persist_collections::daemon::DaemonSaveError>(),
+        Some(persist_collections::daemon::DaemonSaveError::Indeterminate(
+            _
+        ))
+    ) {
+        return true;
+    }
+    cause.is::<SaveOutcomeUnknown>()
+}
+
 fn read_records<F: SnapshotFormat>(source: &Path) -> io::Result<Records> {
     let _lock = lock_snapshot(source)?;
     FileSnapshot::<F>::new(source)?.read_value()
@@ -442,8 +512,19 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("persist-collections: {error}");
-            ExitCode::FAILURE
+            command_error_status(&error)
         }
+    }
+}
+
+fn command_error_status(error: &io::Error) -> ExitCode {
+    match error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<DeleteProblem>())
+    {
+        Some(DeleteProblem::NotFound(_)) => ExitCode::from(2),
+        Some(DeleteProblem::OutcomeUnknown { .. }) => ExitCode::from(3),
+        None => ExitCode::FAILURE,
     }
 }
 
@@ -502,5 +583,49 @@ mod tests {
             Ok(())
         });
         assert_eq!(insert("note".into()).unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_reports_missing_without_committing_and_preserves_the_next_id_on_success() {
+        let delete = delete_once(Stored::memory(Records::empty()), |_, _| {
+            panic!("a missing ID must never reach commit")
+        });
+        let missing = delete(1).unwrap_err();
+        assert_eq!(command_error_status(&missing), ExitCode::from(2));
+
+        let mut records = Records::empty();
+        records.insert("note".into()).unwrap();
+        let delete = delete_once(Stored::memory(records), |change, staged| {
+            assert!(matches!(change, Change::Delete { id: 1 }));
+            assert!(staged.get().records.is_empty());
+            assert_eq!(staged.get().next_id, 2);
+            Ok(())
+        });
+        assert!(delete(1).is_ok());
+    }
+
+    #[test]
+    fn delete_distinguishes_unknown_commit_from_an_ordinary_missing_file() {
+        let mut records = Records::empty();
+        records.insert("note".into()).unwrap();
+        let delete = delete_once(Stored::memory(records), |_, _| {
+            Err(io::Error::other(SaveOutcomeUnknown::new(io::Error::other(
+                "sync failed",
+            ))))
+        });
+        let unknown = delete(1).unwrap_err();
+        assert_eq!(command_error_status(&unknown), ExitCode::from(3));
+
+        let mut records = Records::empty();
+        records.insert("note".into()).unwrap();
+        let delete = delete_once(Stored::memory(records), |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "parent directory disappeared",
+            ))
+        });
+        let failed = delete(1).unwrap_err();
+        assert_eq!(command_error_status(&failed), ExitCode::FAILURE);
+        assert_eq!(failed.to_string(), "parent directory disappeared");
     }
 }

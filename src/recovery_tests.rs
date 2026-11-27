@@ -1,4 +1,4 @@
-use super::{JsonSnapshot, SavePoint};
+use super::{JsonSnapshot, SaveOutcomeUnknown, SavePoint};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -37,7 +37,12 @@ fn save_errors_preserve_whole_snapshots() -> io::Result<()> {
             }
             Ok(())
         });
-        assert_eq!(result.unwrap_err().to_string(), "injected save failure");
+        let error = result.unwrap_err();
+        let unknown = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<SaveOutcomeUnknown>());
+        assert_eq!(unknown.is_some(), point == SavePoint::Published);
+        assert!(error.to_string().contains("injected save failure"));
         assert_eq!(
             snapshot.read_value::<State>()?,
             state(expected),

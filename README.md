@@ -91,7 +91,9 @@ cargo run -- records.json delete 1
 cargo run -- records.json list
 ```
 
-`insert` prints a numeric ID. `list` prints a JSON array of records in ID order, or `[]` for a missing snapshot. `delete` exits successfully without output and reports an error for a missing ID. Each change saves the full snapshot. IDs survive restarts and are never reused during the lifetime of that snapshot, even after deleting all records.
+`insert` prints a numeric ID. `list` prints a JSON array of records in ID order, or `[]` for a missing snapshot. `delete` exits successfully without output and reports an error for a missing ID. IDs survive restarts and keep increasing even after deleting all records.
+
+`delete` uses the same commit function for the selected storage strategy as `insert`. A missing ID skips the commit. The exit codes are **0** for a confirmed deletion, **2** for a missing record, **3** when the deletion may already have taken effect, and **1** for other errors. On exit code 3, reopen the store with `list` and check the ID before retrying.
 
 The final `list` prints:
 
@@ -210,7 +212,7 @@ cargo run -- --format postcard-crc32 checked.postcard list
 
 ## Scope
 
-The CLI manages one collection per file and saves the entire snapshot after each change. It supports standalone insert and delete operations. Multi-operation transactions are outside the current scope. Process termination tests run on Linux, Windows, and macOS. Physical power-loss recovery remains unverified.
+The CLI manages one collection per store. It supports standalone insert and delete operations. Multi-operation transactions are outside the current scope. Process termination tests run on Linux, Windows, and macOS. Physical power-loss recovery remains unverified.
 
 ## Verify
 

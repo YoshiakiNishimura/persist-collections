@@ -208,8 +208,8 @@ fn invalid_commands_and_invalid_snapshots_preserve_data() {
     let path = dir.path().join("records.json");
     success(&path, &["insert", "saved"]);
     let previous = fs::read(&path).unwrap();
-    assert!(!run(&path, &["delete", "99"]).status.success());
-    assert!(!run(&path, &["delete", "0"]).status.success());
+    assert_eq!(run(&path, &["delete", "99"]).status.code(), Some(2));
+    assert_eq!(run(&path, &["delete", "0"]).status.code(), Some(1));
     assert!(!run(&path, &["list", "extra"]).status.success());
     assert_eq!(fs::read(&path).unwrap(), previous);
 

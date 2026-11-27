@@ -1,5 +1,7 @@
 use super::{Change, Records};
-use persist_collections::{Checked, FileSnapshot, JsonSnapshot, SnapshotFormat};
+use persist_collections::{
+    Checked, FileSnapshot, JsonSnapshot, SaveOutcomeUnknown, SnapshotFormat,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
@@ -139,11 +141,7 @@ impl<'a, F: SnapshotFormat> Wal<'a, F> {
             file.sync_all()?;
             sync_directory(self.directory)
         })();
-        result.map_err(|error| {
-            io::Error::other(format!(
-                "WAL commit outcome unknown; reopen before retrying: {error}"
-            ))
-        })
+        result.map_err(|error| io::Error::other(SaveOutcomeUnknown::new(error)))
     }
 
     pub(super) fn checkpoint(self, records: &Records) -> io::Result<()> {
