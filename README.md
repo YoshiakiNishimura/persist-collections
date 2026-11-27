@@ -38,6 +38,24 @@ Each `save()` writes the entire collection to a temporary file in the same direc
 
 Use the `Save<C>` trait and `Stored::with_backend` to add another backend. Loading is part of the backend's own API.
 
+`JsonSnapshot::open_value` also accepts a Serde type, such as a struct containing a collection and its metadata. The decoder reads directly into that type. Collection and backend types are selected at compile time. The existing `open_vec` and `open_array` methods continue to use plain JSON arrays.
+
+## Single-collection CLI
+
+From the repository root, run:
+
+```sh
+cargo run -- records.json insert "first note"
+cargo run -- records.json insert "second note"
+cargo run -- records.json list
+cargo run -- records.json delete 1
+cargo run -- records.json list
+```
+
+`insert` prints a numeric ID. `list` prints a JSON array of records in ID order, or `[]` for a missing snapshot. `delete` exits successfully without output and reports an error for a missing ID. Each change saves the full snapshot. IDs survive restarts and are never reused during the lifetime of that snapshot, even after deleting all records.
+
+The CLI stores the next ID and records together in a JSON object. Use a dedicated data path for it. CLI invocations using the same path coordinate through a persistent sidecar, such as `records.json.lock`. Leave that file in place and use a local filesystem with file-lock support. On WSL, keep the data on the Linux filesystem when using multiple invocations concurrently.
+
 ## Verify
 
 Run `cargo test --locked` from the repository root.

@@ -16,10 +16,12 @@ pub struct Stored<C, B = Memory> {
 /// A backend that keeps everything in memory.
 pub struct Memory;
 
-/// A backend that stores a full collection as a JSON array.
+/// A backend that writes full JSON snapshots.
 pub struct JsonSnapshot {
     path: PathBuf,
 }
+
+struct JsonValueSnapshot(JsonSnapshot);
 
 /// A backend that can save a collection on demand.
 pub trait Save<C> {
@@ -87,7 +89,7 @@ impl JsonSnapshot {
         self,
         fallback: [T; N],
     ) -> io::Result<Stored<[T; N], Self>> {
-        let data = match self.load::<T>()? {
+        let data = match self.load::<Vec<T>>()? {
             Some(values) => values.try_into().map_err(|values: Vec<T>| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -99,7 +101,16 @@ impl JsonSnapshot {
         Ok(Stored::with_backend(data, self))
     }
 
-    fn load<T: DeserializeOwned>(&self) -> io::Result<Option<Vec<T>>> {
+    /// Load a Serde value, or use the supplied value if the file is missing.
+    pub fn open_value<T: Serialize + DeserializeOwned>(
+        self,
+        fallback: T,
+    ) -> io::Result<Stored<T, impl Save<T>>> {
+        let data = self.load()?.unwrap_or(fallback);
+        Ok(Stored::with_backend(data, JsonValueSnapshot(self)))
+    }
+
+    fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -109,7 +120,7 @@ impl JsonSnapshot {
         Ok(Some(values))
     }
 
-    fn write<T: Serialize>(&self, data: &[T]) -> io::Result<()> {
+    fn write<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
         let parent = self.path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -140,6 +151,12 @@ impl<T: Serialize> Save<Vec<T>> for JsonSnapshot {
 
 impl<T: Serialize, const N: usize> Save<[T; N]> for JsonSnapshot {
     fn save(&self, data: &[T; N]) -> io::Result<()> {
-        self.write(data)
+        self.write(data.as_slice())
+    }
+}
+
+impl<T: Serialize> Save<T> for JsonValueSnapshot {
+    fn save(&self, data: &T) -> io::Result<()> {
+        self.0.write(data)
     }
 }
