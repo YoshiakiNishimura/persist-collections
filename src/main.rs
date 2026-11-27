@@ -2,7 +2,7 @@
 use persist_collections::SnapshotFormat as BackendFormat;
 #[cfg(unix)]
 use persist_collections::daemon::DaemonFormat as BackendFormat;
-use persist_collections::{All, Between, One, apply, restrict};
+use persist_collections::{All, Between, One, RecordPredicate, apply, restrict};
 use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
@@ -30,6 +30,7 @@ const USAGE: &str = "Usage:
   persist-collections daemon serve <socket>
   persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | get <id> | range <first> <last> | delete <id> | backup <new-file>)
 Backup and restore accept --backup-format <format> before the file or socket.
+Query syntax: <file, directory, or socket> query <text> [<first-id> <last-id>]
 Delete exit codes: 0 deleted, 2 record missing, 3 outcome unknown, 1 other error.
 Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 
@@ -38,6 +39,7 @@ enum Command {
     List,
     Get(u64),
     Range(u64, u64),
+    Query(RecordPredicate<String>),
     Delete(u64),
     Backup(PathBuf),
     Restore(PathBuf),
@@ -121,19 +123,15 @@ fn run() -> io::Result<()> {
         return Err(usage_error());
     };
     let command = match (command.to_str(), operands) {
-        (Some("insert"), [text]) => Command::Insert(
-            text.to_str()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "record text must be valid UTF-8",
-                    )
-                })?
-                .to_owned(),
-        ),
+        (Some("insert"), [text]) => Command::Insert(parse_text(text)?),
         (Some("list"), []) => Command::List,
         (Some("get"), [id]) => Command::Get(parse_id(id)?),
         (Some("range"), [first, last]) => Command::Range(parse_id(first)?, parse_id(last)?),
+        (Some("query"), [text]) => Command::Query(RecordPredicate::TextEq(parse_text(text)?)),
+        (Some("query"), [text, first, last]) => Command::Query(
+            RecordPredicate::IdBetween(parse_id(first)?..=parse_id(last)?)
+                .and(RecordPredicate::TextEq(parse_text(text)?)),
+        ),
         (Some("checkpoint"), []) => Command::Checkpoint,
         (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
         (Some("restore"), [source]) => Command::Restore(PathBuf::from(source)),
@@ -172,6 +170,15 @@ fn parse_id(id: &OsStr) -> io::Result<u64> {
                 "ID must be a positive 64-bit integer",
             )
         })
+}
+
+fn parse_text(text: &OsStr) -> io::Result<String> {
+    text.to_str().map(str::to_owned).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "record text must be valid UTF-8",
+        )
+    })
 }
 
 fn run_on<F: BackendFormat>(
@@ -227,8 +234,11 @@ fn run_on_bptree<F: SnapshotFormat>(
             let text = tree.get(id)?;
             write_json(&text.as_deref().map(|text| RecordRef { id, text }))
         }
-        Command::List => write_tree_range(&tree, 1, u64::MAX),
-        Command::Range(first, last) => write_tree_range(&tree, first, last),
+        Command::List => write_tree_range(&tree, 1..=u64::MAX, |_, _| true),
+        Command::Range(first, last) => write_tree_range(&tree, first..=last, |_, _| true),
+        Command::Query(predicate) => write_tree_range(&tree, predicate.id_bounds(), |id, text| {
+            predicate.matches(id, text)
+        }),
         Command::Delete(id) => match tree.delete(id) {
             Ok(true) => Ok(()),
             Ok(false) => Err(io::Error::new(
@@ -264,17 +274,25 @@ fn write_json(value: &impl Serialize) -> io::Result<()> {
 
 fn write_tree_range<F: SnapshotFormat>(
     tree: &cow_btree::Tree<'_, F>,
-    first: u64,
-    last: u64,
+    bounds: std::ops::RangeInclusive<u64>,
+    mut accepts: impl FnMut(u64, &str) -> bool,
 ) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let mut serializer = serde_json::Serializer::new(&mut stdout);
     let mut sequence = serializer.serialize_seq(None)?;
-    tree.visit(first, last, |id, text| {
-        sequence.serialize_element(&RecordRef { id, text })?;
+    tree.visit(*bounds.start(), *bounds.end(), |id, text| {
+        if accepts(id, text) {
+            sequence.serialize_element(&RecordRef { id, text })?;
+        }
         Ok(())
     })?;
     sequence.end()?;
+    writeln!(stdout)
+}
+
+fn write_record_rows(rows: impl IntoIterator<Item = impl Serialize>) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::Serializer::new(&mut stdout).collect_seq(rows)?;
     writeln!(stdout)
 }
 
@@ -390,10 +408,7 @@ fn run_records<B>(
             writeln!(io::stdout().lock(), "{id}")?;
         }
         Command::List => {
-            let mut stdout = io::stdout().lock();
-            serde_json::Serializer::new(&mut stdout)
-                .collect_seq(restrict(state.get(), All).map(|(_, record)| record))?;
-            writeln!(stdout)?;
+            write_record_rows(restrict(state.get(), All).map(|(_, record)| record))?;
         }
         Command::Get(id) => {
             write_json(
@@ -403,11 +418,12 @@ fn run_records<B>(
             )?;
         }
         Command::Range(first, last) => {
-            let mut stdout = io::stdout().lock();
-            serde_json::Serializer::new(&mut stdout).collect_seq(
+            write_record_rows(
                 restrict(state.get(), Between(first..=last)).map(|(_, record)| record),
             )?;
-            writeln!(stdout)?;
+        }
+        Command::Query(predicate) => {
+            write_record_rows(restrict(state.get(), predicate).map(|(_, record)| record))?;
         }
         Command::Delete(id) => {
             delete_once(state, commit)(id)?;

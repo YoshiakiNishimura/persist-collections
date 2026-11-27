@@ -283,6 +283,24 @@ The B+ tree defines search, range traversal, and how to split or prune pages. It
 
 Empty branches can be pruned; partially filled pages are retained. This implementation uses a store lock and retains old pages. Page space reclamation and CLI backup/restore for this strategy are future work. Keep the root and page file together.
 
+## Compose restrictions by condition
+
+Combine typed predicates with `.and(...)` and pass the result to `restrict`. Intersecting two predicates selects the same entries as applying the two restrictions in sequence.
+
+```rust
+use persist_collections::{IdRecords, RecordPredicate, restrict};
+
+fn main() -> std::io::Result<()> {
+    let mut records = IdRecords::empty();
+    records.apply(records.prepare_insert("note".into())?)?;
+    let condition = RecordPredicate::IdBetween(1..=10).and(RecordPredicate::TextEq("note"));
+    assert_eq!(restrict(&records, condition).map(|(id, _)| id).collect::<Vec<_>>(), [1]);
+    Ok(())
+}
+```
+
+The CLI `query <text> [<first-id> <last-id>]` matches exact text. The optional inclusive ID interval is composed with the text condition. A B+ tree uses the interval to start the read and checks the text only on the candidates it visits. A text-only query traverses the whole collection.
+
 ## Share a snapshot through a local daemon
 
 On Linux, macOS, or WSL, start a daemon in one terminal. Use a new private directory on the local Unix filesystem:

@@ -226,6 +226,24 @@ B+木本体は検索・範囲走査と、ページの分割・枝の削除を決
 
 空になった枝は取り除き、要素が残るページは維持します。ストアロックを使い、古いページを保持します。領域回収とこの方式のCLIバックアップ・復元は今後の範囲です。ルートとページファイルは同じディレクトリに保管してください。
 
+## 条件を合成して選ぶ
+
+条件を `.and(...)` で合成し、`restrict` に渡せます。二つの条件の積集合を取ることと、二つの制限を順に適用することは、選ばれる要素について同じ結果になります。
+
+```rust
+use persist_collections::{IdRecords, RecordPredicate, restrict};
+
+fn main() -> std::io::Result<()> {
+    let mut records = IdRecords::empty();
+    records.apply(records.prepare_insert("メモ".into())?)?;
+    let condition = RecordPredicate::IdBetween(1..=10).and(RecordPredicate::TextEq("メモ"));
+    assert_eq!(restrict(&records, condition).map(|(id, _)| id).collect::<Vec<_>>(), [1]);
+    Ok(())
+}
+```
+
+CLIの `query <本文> [<最初のID> <最後のID>]` は本文の完全一致を調べます。ID範囲を指定すると、両端を含む条件を本文条件と合成します。B+木では先にID範囲まで移動し、そこにある候補だけ本文を照合します。本文条件だけの場合は全体を走査します。
+
 ## ファイル形式を選ぶ
 
 CLIの既定はJSONです。CLIのビルドには、既定で有効になる `json`、`msgpack`、`postcard`、`checksum` のCargo機能が必要です。ファイルの拡張子は保存形式の選択に影響しません。ファイルを開くたびに同じ形式を `--format` で指定してください。`list` の出力形式はどの保存形式でもJSONです。

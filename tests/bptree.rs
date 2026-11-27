@@ -9,6 +9,42 @@ use serde_json::{Value, json};
 use std::{fs, process::Command};
 
 #[test]
+fn composed_query_returns_the_same_rows_across_file_strategies() {
+    let dir = tempfile::tempdir().unwrap();
+    let strategies = [
+        ("snapshot", dir.path().join("snapshot.json")),
+        ("wal", dir.path().join("wal")),
+        ("cow-btree", dir.path().join("tree")),
+    ];
+    for (strategy, path) in strategies {
+        if strategy != "snapshot" {
+            fs::create_dir(&path).unwrap();
+        }
+        let run = |args: &[&str]| {
+            let output = Command::new(env!("CARGO_BIN_EXE_persist-collections"))
+                .args(["--strategy", strategy])
+                .arg(&path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            output.stdout
+        };
+        for number in 1..=25 {
+            run(&["insert", if number % 2 == 0 { "note" } else { "other" }]);
+        }
+        let rows: Value = serde_json::from_slice(&run(&["query", "note", "17", "22"])).unwrap();
+        assert_eq!(
+            rows,
+            json!([{"id":18,"text":"note"},{"id":20,"text":"note"},{"id":22,"text":"note"}])
+        );
+        assert_eq!(run(&["query", "note", "22", "17"]), b"[]\n");
+        let rows: Value = serde_json::from_slice(&run(&["query", "note"])).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 12);
+    }
+}
+
+#[test]
 fn cli_reads_and_writes_a_separate_cow_btree_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();

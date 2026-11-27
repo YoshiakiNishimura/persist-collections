@@ -294,6 +294,18 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(rows, [38, 39, 40]);
+
+        let predicate = persist_collections::RecordPredicate::IdBetween(38..=40)
+            .and(persist_collections::RecordPredicate::TextEq("note 39"));
+        let bounds = predicate.id_bounds();
+        let mut matched = Vec::new();
+        tree.visit(*bounds.start(), *bounds.end(), |id, text| {
+            if predicate.matches(id, text) {
+                matched.push(id);
+            }
+            Ok(())
+        })?;
+        assert_eq!(matched, [39]);
         Ok(())
     }
 }

@@ -9,6 +9,7 @@ use std::{
 };
 
 mod operations;
+mod predicate;
 mod records;
 mod shape;
 
@@ -18,6 +19,7 @@ pub use operations::{
     RemoveAt, RemoveByKey, RemoveKey, RemovePosition, ReplaceAt, ReplacePosition, Selection,
     VecChange, apply, restrict,
 };
+pub use predicate::RecordPredicate;
 pub use records::{IdChange, IdRecord, IdRecords};
 pub use shape::{Addressing, CollectionShape, IdAllocation, IterationOrder, Length, Shape};
 
