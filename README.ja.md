@@ -9,7 +9,7 @@ Rustのデータ構造、保存バックエンド、ファイル形式をそれ�
 | 選択するもの | 組み込みの選択肢 | 拡張方法 |
 | --- | --- | --- |
 | データ構造 | `Vec<T>`、固定長配列 `[T; N]`、バックエンドが扱える任意の型 | 独自のRust型を `C` に指定 |
-| 保存バックエンド | `Memory`、`FileSnapshot<F>` | `Save<C>` を実装し、読み込みAPIを用意 |
+| 保存バックエンド | `Memory`、`FileSnapshot<F>`、Unixの `DaemonSnapshot<F>` | `Save<C>` を実装し、読み込みAPIを用意 |
 | ファイル形式 | JSON、MessagePack、Postcard | `SnapshotFormat` を実装 |
 
 ## はじめ方
@@ -103,6 +103,31 @@ fn main() -> std::io::Result<()> {
 `Vec` には `open_vec(vec![1, 2])`、構造体などのSerde対応型には `open_value(initial_value)` を使います。初期値を使うのはファイルが見つからない場合です。データが壊れている場合や配列の長さが異なる場合はエラーを返します。保存先の親ディレクトリは先に作ってください。`Vec` と固定長配列をJSON形式で保存すると、ファイルの内容はJSON配列になります。読み込みには `Deserialize`、保存には `Serialize` が必要です。独自の型にderiveを使う場合は、プロジェクトの依存関係に `serde = { version = "1", features = ["derive"] }` を追加します。
 
 変更の保存には明示的に `save()` を呼びます。値を破棄したときの自動保存はありません。ライブラリから同じファイルを複数の書き手で操作する場合は、読み込みから保存までの排他制御を呼び出し側で行ってください。排他制御がなければ、最後に成功したファイル置換の内容が残ります。独自のバックエンドは `Save<C>` を実装し、`Stored::with_backend` で組み合わせられます。
+
+## 常駐プロセスのメモリを使う
+
+Linux、macOS、WSLでは、端末を1つ開き、ローカルのUnixファイルシステムに非公開ディレクトリを作って常駐プロセスを起動します。
+
+```sh
+mkdir -m 700 "$HOME/.persist-collections-demo"
+cargo run -- daemon serve "$HOME/.persist-collections-demo/store.sock"
+```
+
+別の端末から、同じソケットを指定して操作します。
+
+```sh
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" insert "最初のメモ"
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" list
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" delete 1
+```
+
+Rustでは `DaemonSnapshot::<Postcard>::open_vec`、`open_array`、`open_value` にソケットのパスと初期値を渡し、ファイルと同じ `save()` を呼びます。1ソケットにつき1スナップショットを保持します。最初に保存したクライアントが形式を決めるので、以後は同じ形式とRust型を使ってください。独自形式には `daemon::DaemonFormat` で固有の識別子を指定できます。
+
+常駐バックエンドでの保存成功は、そのプロセスのRAMへの反映を意味します。CLIを終了してもデータは残り、常駐プロセスを停止すると消えます。ファイルバックエンドはファイルへの同期と置換を行い、`Memory` は呼び出し元のプロセスに保持します。どの形式で符号化するかとは独立した選択です。
+
+古い状態を持つクライアントからの保存は競合になります。開き直して最新の状態に変更を適用してください。保存応答が途切れたときは、再試行の前に開き直して状態を確認してください。接続は開始時の常駐プロセスに結び付いており、自動再接続は行いません。操作がない接続は30秒で切断します。同時接続は16件、スナップショットは16 MiBまでです。
+
+ソケットのディレクトリにアクセスできる、信頼済みのクライアント向けです。常駐プロセスは Ctrl+C で停止できます。同じパスを再利用するときは、停止を確認して残ったソケットファイルを削除するか、新しいパスを選んでください。CLIのバックアップと復元はファイルバックエンドで利用できます。Windowsネイティブではファイルバックエンドを利用してください。
 
 ## バックアップと復元
 

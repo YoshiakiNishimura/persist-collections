@@ -9,7 +9,7 @@ Choose the data structure, storage backend, and file format separately. `Stored<
 | Choice | Built in | Extension point |
 | --- | --- | --- |
 | Data structure | `Vec<T>`, `[T; N]`, and types supported by the selected backend | Pass your own Rust type as `C` |
-| Storage backend | `Memory` and `FileSnapshot<F>` | Implement `Save<C>` and provide your own loading API |
+| Storage backend | `Memory`, `FileSnapshot<F>`, and `DaemonSnapshot<F>` on Unix | Implement `Save<C>` and provide your own loading API |
 | Snapshot format | JSON, MessagePack, and Postcard | Implement `SnapshotFormat` |
 
 ## Get started
@@ -111,6 +111,31 @@ cargo run -- --format postcard records.postcard list
 ```
 
 Choose the format when creating a store and use the same selection when reopening it. The CLI prints `list` as JSON for every file format. Existing JSON files continue to work with the default commands.
+
+## Share a snapshot through a local daemon
+
+On Linux, macOS, or WSL, start a daemon in one terminal. Use a new private directory on the local Unix filesystem:
+
+```sh
+mkdir -m 700 "$HOME/.persist-collections-demo"
+cargo run -- daemon serve "$HOME/.persist-collections-demo/store.sock"
+```
+
+In another terminal, point each command to that socket:
+
+```sh
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" insert "first note"
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" list
+cargo run -- --backend daemon --format postcard "$HOME/.persist-collections-demo/store.sock" delete 1
+```
+
+In Rust, use `DaemonSnapshot::<Postcard>::open_vec`, `open_array`, or `open_value` with the socket path and a fallback. Call `save()` as with a file backend. The socket stores one snapshot, and the first save establishes its codec. Use the same codec and Rust schema for subsequent clients. Custom codecs can implement `daemon::DaemonFormat` with an identifier unique to their encoding.
+
+A successful daemon save confirms that the snapshot reached the daemon's RAM. It survives CLI exits and is cleared when the daemon exits. File snapshots use file synchronization and replacement; in-process memory keeps state in the caller. The format choice is independent of these lifetimes.
+
+Concurrent clients holding stale snapshots receive a conflict. Reopen and apply the intended change to the latest state. If the connection drops while saving, reopen and inspect the data before retrying. Each connection is tied to the daemon process that opened it, and the client never reconnects automatically. Idle sessions expire after 30 seconds. The daemon supports 16 active connections and snapshots up to 16 MiB.
+
+The socket is local to trusted clients with access to its directory. Stop the daemon with Ctrl+C. Before reusing the socket path, confirm the process has stopped and remove its leftover socket file, or choose a new path. The file backend supports the CLI backup and restore commands. Native Windows supports the file backend.
 
 ## Recovery and backup
 

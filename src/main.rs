@@ -1,4 +1,10 @@
-use persist_collections::{Checked, FileSnapshot, Json, MessagePack, Postcard, SnapshotFormat};
+#[cfg(not(unix))]
+use persist_collections::SnapshotFormat as BackendFormat;
+#[cfg(unix)]
+use persist_collections::daemon::DaemonFormat as BackendFormat;
+use persist_collections::{
+    Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SnapshotFormat, Stored,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -8,7 +14,11 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "Usage: persist-collections [--format json|msgpack|postcard|json-crc32|msgpack-crc32|postcard-crc32] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)";
+const USAGE: &str = "Usage:
+  persist-collections [--format <format>] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)
+  persist-collections daemon serve <socket>
+  persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id>)
+Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 
 #[derive(Deserialize, Serialize)]
 struct Record {
@@ -82,6 +92,12 @@ enum Command {
     Restore(PathBuf),
 }
 
+#[derive(Clone, Copy)]
+enum Backend {
+    File,
+    Daemon,
+}
+
 fn lock_snapshot(path: &Path) -> io::Result<File> {
     let lock_path = path.with_added_extension("lock");
     let lock = OpenOptions::new()
@@ -100,10 +116,25 @@ fn run() -> io::Result<()> {
         return writeln!(io::stdout().lock(), "{USAGE}");
     }
     let usage_error = || io::Error::new(io::ErrorKind::InvalidInput, USAGE);
-    let (format, args) = match args.as_slice() {
-        [flag, format, rest @ ..] if flag == "--format" => (format.to_str(), rest),
-        args => (Some("json"), args),
-    };
+    if let [backend, command, socket] = args.as_slice()
+        && backend == "daemon"
+        && command == "serve"
+    {
+        return serve_daemon(Path::new(socket));
+    }
+    let mut args = args.as_slice();
+    let mut format = Some("json");
+    let mut backend = Backend::File;
+    while let [flag, value, rest @ ..] = args {
+        match flag.to_str() {
+            Some("--format") => format = value.to_str(),
+            Some("--backend") if value == "file" => backend = Backend::File,
+            Some("--backend") if value == "daemon" => backend = Backend::Daemon,
+            Some("--backend") => return Err(usage_error()),
+            _ => break,
+        }
+        args = rest;
+    }
     let [path, command, operands @ ..] = args else {
         return Err(usage_error());
     };
@@ -136,17 +167,23 @@ fn run() -> io::Result<()> {
     };
 
     match format {
-        Some("json") => run_on::<Json>(Path::new(path), command),
-        Some("msgpack") => run_on::<MessagePack>(Path::new(path), command),
-        Some("postcard") => run_on::<Postcard>(Path::new(path), command),
-        Some("json-crc32") => run_on::<Checked<Json>>(Path::new(path), command),
-        Some("msgpack-crc32") => run_on::<Checked<MessagePack>>(Path::new(path), command),
-        Some("postcard-crc32") => run_on::<Checked<Postcard>>(Path::new(path), command),
+        Some("json") => run_on::<Json>(backend, Path::new(path), command),
+        Some("msgpack") => run_on::<MessagePack>(backend, Path::new(path), command),
+        Some("postcard") => run_on::<Postcard>(backend, Path::new(path), command),
+        Some("json-crc32") => run_on::<Checked<Json>>(backend, Path::new(path), command),
+        Some("msgpack-crc32") => run_on::<Checked<MessagePack>>(backend, Path::new(path), command),
+        Some("postcard-crc32") => run_on::<Checked<Postcard>>(backend, Path::new(path), command),
         _ => Err(usage_error()),
     }
 }
 
-fn run_on<F: SnapshotFormat>(path: &Path, command: Command) -> io::Result<()> {
+fn run_on<F: BackendFormat>(backend: Backend, path: &Path, command: Command) -> io::Result<()> {
+    if matches!(backend, Backend::Daemon) {
+        #[cfg(unix)]
+        return run_on_daemon::<F>(path, command);
+        #[cfg(not(unix))]
+        return serve_daemon(path);
+    }
     match command {
         Command::Backup(destination) => return copy_snapshot::<F>(path, &destination),
         Command::Restore(source) => return copy_snapshot::<F>(&source, path),
@@ -154,7 +191,57 @@ fn run_on<F: SnapshotFormat>(path: &Path, command: Command) -> io::Result<()> {
     }
     let snapshot = FileSnapshot::<F>::new(path)?;
     let _lock = lock_snapshot(path)?;
-    let mut state = snapshot.open_value(Records::empty())?;
+    run_records(snapshot.open_value(Records::empty())?, command)
+}
+
+#[cfg(unix)]
+fn serve_daemon(path: &Path) -> io::Result<()> {
+    use std::{
+        fs,
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+    };
+
+    let path = std::path::absolute(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket path needs a parent directory",
+        )
+    })?;
+    let metadata = fs::metadata(parent)?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "daemon socket needs a private parent directory (mode 0700)",
+        ));
+    }
+    persist_collections::daemon::serve(UnixListener::bind(path)?)
+}
+
+#[cfg(unix)]
+fn run_on_daemon<F: BackendFormat>(path: &Path, command: Command) -> io::Result<()> {
+    if matches!(command, Command::Backup(_) | Command::Restore(_)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backup and restore require the file backend",
+        ));
+    }
+    let state = persist_collections::DaemonSnapshot::<F>::open_value(path, Records::empty())?;
+    run_records(state, command)
+}
+
+#[cfg(not(unix))]
+fn serve_daemon(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the daemon backend requires Unix-domain sockets on a Unix platform",
+    ))
+}
+
+fn run_records<B: Save<Records>>(
+    mut state: Stored<Records, B>,
+    command: Command,
+) -> io::Result<()> {
     state.get().validate()?;
 
     match command {

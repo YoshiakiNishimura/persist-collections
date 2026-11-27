@@ -36,6 +36,11 @@ mod checksum;
 #[cfg(feature = "checksum")]
 pub use checksum::Checked;
 
+#[cfg(unix)]
+pub mod daemon;
+#[cfg(unix)]
+pub use daemon::DaemonSnapshot;
+
 #[cfg(feature = "json")]
 /// JSON snapshot format.
 pub struct Json;
@@ -125,6 +130,8 @@ impl SnapshotFormat for Postcard {
 }
 
 /// A backend that can save a collection on demand.
+///
+/// Each backend defines what state a successful save confirms.
 pub trait Save<C> {
     fn save(&self, data: &C) -> io::Result<()>;
 }
@@ -233,15 +240,7 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let mut reader = BufReader::new(file);
-        let value = F::decode(&mut reader)?;
-        if !reader.fill_buf()?.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "trailing snapshot data",
-            ));
-        }
-        Ok(Some(value))
+        decode_complete::<F, T>(BufReader::new(file)).map(Some)
     }
 
     fn write<T: Serialize + ?Sized>(&self, data: &T) -> io::Result<()> {
@@ -282,6 +281,19 @@ impl<F: SnapshotFormat> FileSnapshot<F> {
         directory.sync_all()?;
         Ok(())
     }
+}
+
+fn decode_complete<F: SnapshotFormat, T: DeserializeOwned>(
+    mut reader: impl BufRead,
+) -> io::Result<T> {
+    let value = F::decode(&mut reader)?;
+    if !reader.fill_buf()?.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing snapshot data",
+        ));
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
