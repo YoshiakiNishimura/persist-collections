@@ -1,0 +1,13 @@
+[package]
+name = "persist-collections"
+version = "0.1.0"
+edition = "2024"
+description = "Standard Rust collections with optional JSON snapshots"
+license = "MIT"
+repository = "https://github.com/YoshiakiNishimura/persist-collections"
+readme = "README.md"
+
+[dependencies]
+serde = "1"
+serde_json = "1"
+tempfile = "3"
