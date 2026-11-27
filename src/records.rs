@@ -91,6 +91,16 @@ impl IdRecords {
         self.next_id
     }
 
+    fn position(&self, id: u64) -> Option<usize> {
+        self.records
+            .binary_search_by_key(&id, |record| record.id)
+            .ok()
+    }
+
+    pub(crate) fn find(&self, id: u64) -> Option<&IdRecord> {
+        self.position(id).map(|position| &self.records[position])
+    }
+
     /// Restrict the domain to an ID interval while preserving ID order.
     pub fn restrict(&self, ids: impl RangeBounds<u64>) -> &[IdRecord] {
         let start = match ids.start_bound() {
@@ -131,15 +141,12 @@ impl IdRecords {
                 Ok(())
             }
             IdChange::Delete { id } => {
-                let position = self
-                    .records
-                    .binary_search_by_key(&id, |record| record.id)
-                    .map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("record {id} does not exist"),
-                        )
-                    })?;
+                let position = self.position(id).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("record {id} does not exist"),
+                    )
+                })?;
                 self.records.remove(position);
                 Ok(())
             }

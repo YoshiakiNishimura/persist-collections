@@ -212,8 +212,7 @@ fn replay<F: SnapshotFormat>(
             if sequence.checked_add(1) != Some(entry.sequence) {
                 return Err(invalid("WAL sequence gap after checkpoint"));
             }
-            records
-                .apply(entry.change)
+            persist_collections::apply(records, entry.change)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             *sequence = entry.sequence;
         }

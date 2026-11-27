@@ -8,9 +8,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod operations;
 mod records;
 mod shape;
 
+pub use operations::{
+    All, ArrayChange, Collection, Matching, One, Selection, VecChange, apply, restrict,
+};
 pub use records::{IdChange, IdRecord, IdRecords};
 pub use shape::{Addressing, CollectionShape, IdAllocation, IterationOrder, Length, Shape};
 

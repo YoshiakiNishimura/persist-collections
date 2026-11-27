@@ -63,6 +63,29 @@ fn main() -> std::io::Result<()> {
 
 Current shape metadata is built in for these three types. It can be read without a collection instance or a codec. The contract version describes logical behavior and is independent from any file format version. The metadata itself lives in the Rust type.
 
+## Common collection operations
+
+`restrict(&collection, selector)` yields original addresses and borrowed values. `All` traverses every entry, `One(key)` yields zero or one entry, and `Matching(predicate)` filters the ordered traversal lazily. Use `.next()` to take the first match.
+
+```rust
+use persist_collections::{All, ArrayChange, Matching, One, VecChange, apply, restrict};
+
+fn main() -> std::io::Result<()> {
+    let mut values = vec![10, 20, 30];
+    assert_eq!(restrict(&values, All).count(), 3);
+    assert_eq!(restrict(&values, One(1)).next(), Some((1, &20)));
+    let selected = restrict(&values, Matching(|_, value: &i32| *value > 10));
+    assert_eq!(selected.map(|(position, _)| position).collect::<Vec<_>>(), [1, 2]);
+
+    apply(&mut values, VecChange::Remove { at: 1 })?;
+    let mut slots = [10, 20, 30];
+    apply(&mut slots, ArrayChange::Replace { at: 1, value: 99 })?;
+    Ok(())
+}
+```
+
+`apply` accepts the change type for the collection. Vectors can shift positions after removal. Arrays support length-preserving replacement. Use `IdChange` to update `IdRecords`. A `One` selection over `IdRecords` takes a stable ID and uses binary search. Apply changes in memory, then use the chosen backend to save them when needed.
+
 ## In memory
 
 ```rust

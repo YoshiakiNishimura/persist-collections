@@ -2,11 +2,13 @@
 use persist_collections::SnapshotFormat as BackendFormat;
 #[cfg(unix)]
 use persist_collections::daemon::DaemonFormat as BackendFormat;
+use persist_collections::{All, apply, restrict};
 use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
 };
 use persist_collections::{IdChange as Change, IdRecords as Records};
+use serde::Serializer as _;
 use std::{
     env, fmt,
     fs::{File, OpenOptions},
@@ -310,7 +312,8 @@ fn run_records<B>(
         }
         Command::List => {
             let mut stdout = io::stdout().lock();
-            serde_json::to_writer(&mut stdout, state.get().restrict(..))?;
+            serde_json::Serializer::new(&mut stdout)
+                .collect_seq(restrict(state.get(), All).map(|(_, record)| record))?;
             writeln!(stdout)?;
         }
         Command::Delete(id) => {
@@ -347,9 +350,7 @@ fn apply_once<B>(
         Change::Insert { id, next_id, .. } => (id, Some(next_id)),
         Change::Delete { id } => (id, None),
     };
-    state
-        .get_mut()
-        .apply(change)
+    apply(state.get_mut(), change)
         .map_err(ApplyOnceError::Apply)
         .and_then(|()| {
             let change = match next_id {
