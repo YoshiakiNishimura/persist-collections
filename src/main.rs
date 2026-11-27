@@ -20,6 +20,7 @@ use std::{
 };
 
 mod bptree;
+mod cow_btree;
 mod wal;
 
 const USAGE: &str = "Usage:
@@ -219,7 +220,7 @@ fn run_on_bptree<F: SnapshotFormat>(
     format: &str,
 ) -> io::Result<()> {
     let _lock = lock_snapshot(&directory.join("store"))?;
-    let tree = bptree::Tree::<F>::open(directory, format)?;
+    let tree = cow_btree::Tree::<F>::open(directory, format)?;
     match command {
         Command::Insert(text) => writeln!(io::stdout().lock(), "{}", tree.insert(text)?),
         Command::Get(id) => {
@@ -262,7 +263,7 @@ fn write_json(value: &impl Serialize) -> io::Result<()> {
 }
 
 fn write_tree_range<F: SnapshotFormat>(
-    tree: &bptree::Tree<'_, F>,
+    tree: &cow_btree::Tree<'_, F>,
     first: u64,
     last: u64,
 ) -> io::Result<()> {

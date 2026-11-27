@@ -279,7 +279,9 @@ cargo run -- --strategy cow-btree --format postcard tree-store get 1
 cargo run -- --strategy cow-btree --format postcard tree-store range 1 10
 ```
 
-On update, the tree appends copies of the changed path and syncs the page file, then publishes the new root and next ID together. Readers navigate from the published root. Empty branches can be pruned; partially filled pages are retained. This first implementation uses a store lock and retains old pages. Page space reclamation and CLI backup/restore for this strategy are future work. Keep the root and page file together.
+The B+ tree defines search, range traversal, and how to split or prune pages. It asks a page store to write new or replacement pages. The copy-on-write strategy writes replacements at fresh locations, syncs the page file, then publishes the new root and next ID together. Readers navigate from the published root.
+
+Empty branches can be pruned; partially filled pages are retained. This implementation uses a store lock and retains old pages. Page space reclamation and CLI backup/restore for this strategy are future work. Keep the root and page file together.
 
 ## Share a snapshot through a local daemon
 
