@@ -296,8 +296,7 @@ fn run_records<B: Save<Records>>(
 
     match command {
         Command::Insert(text) => {
-            let id = state.get_mut().insert(text)?;
-            state.save()?;
+            let id = insert_once(state)(text)?;
             writeln!(io::stdout().lock(), "{id}")?;
         }
         Command::List => {
@@ -312,6 +311,15 @@ fn run_records<B: Save<Records>>(
         Command::Backup(_) | Command::Restore(_) => unreachable!(),
     }
     Ok(())
+}
+
+fn insert_once<B: Save<Records>>(
+    mut state: Stored<Records, B>,
+) -> impl FnOnce(String) -> io::Result<u64> {
+    move |text| {
+        let prepared = state.get_mut().insert(text);
+        prepared.and_then(|id| state.save().map(|()| id))
+    }
 }
 
 fn read_records<F: SnapshotFormat>(source: &Path) -> io::Result<Records> {
@@ -337,5 +345,42 @@ fn main() -> ExitCode {
             eprintln!("persist-collections: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct FailingSave<'a>(&'a Cell<usize>);
+
+    impl Save<Records> for FailingSave<'_> {
+        fn save(&self, records: &Records) -> io::Result<()> {
+            self.0.set(self.0.get() + 1);
+            assert_eq!(records.next_id, 2);
+            assert_eq!(records.records[0].id, 1);
+            Err(io::Error::other("save failed"))
+        }
+    }
+
+    #[test]
+    fn insert_calls_save_only_after_preparation_and_returns_its_error() {
+        let saves = Cell::new(0);
+        let mut exhausted = Records::empty();
+        exhausted.next_id = u64::MAX;
+        let insert = insert_once(Stored::with_backend(exhausted, FailingSave(&saves)));
+        assert_eq!(
+            insert("note".into()).unwrap_err().to_string(),
+            "record IDs exhausted"
+        );
+        assert_eq!(saves.get(), 0);
+
+        let insert = insert_once(Stored::with_backend(Records::empty(), FailingSave(&saves)));
+        assert_eq!(
+            insert("note".into()).unwrap_err().to_string(),
+            "save failed"
+        );
+        assert_eq!(saves.get(), 1);
     }
 }

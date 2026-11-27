@@ -55,6 +55,24 @@ cargo run -- records.json list
 
 データには専用のパスを使ってください。CLIは同じパスに対する操作を `records.json.lock` のようなファイル上の協調ロックで調整します。別のツールやライブラリを直接使うコードには、独自の排他制御が必要です。ロックファイルは残しておき、ファイルロックをサポートするローカルのファイルシステムを使ってください。WSLで複数のコマンドを並行実行する場合は、データを `/mnt/c` の外にあるLinux側のファイルシステムに置いてください。
 
+### insert の確定フロー
+
+CLIはコレクションを開いて検証し、その状態を持つ1回呼び出し用の関数 `insert_once` を作ります。関数の中では既存の `Records::insert` で行を追加してIDを採番します。追加に成功したときだけ `and_then` で既存の `save()` を呼び、保存を確認できたらIDを出力します。
+
+```mermaid
+flowchart TD
+    Open["コレクションを開いて検証"] --> Insert["insert_once にレコードを渡す"]
+    Insert --> Prepare["Records::insert で追加を準備し、IDを採番"]
+    Prepare --> Prepared{"追加の準備に成功？"}
+    Prepared -->|成功| Save["and_then で選択中のバックエンドの save() を呼ぶ"]
+    Prepared -->|失敗| Failure["IDを出力せずエラーを返す"]
+    Save --> Saved{"保存に成功？"}
+    Saved -->|成功| Success["採番したIDを返して出力する"]
+    Saved -->|失敗| Failure
+```
+
+準備した状態は今回の呼び出しが所有します。`save()` がエラーを返した場合でも、保存先ではすでに反映されていることがあります。結果が不明な場合は、再試行する前に開き直して確認してください。
+
 ## ファイル形式を選ぶ
 
 CLIの既定はJSONです。CLIのビルドには、既定で有効になる `json`、`msgpack`、`postcard`、`checksum` のCargo機能が必要です。ファイルの拡張子は保存形式の選択に影響しません。ファイルを開くたびに同じ形式を `--format` で指定してください。`list` の出力形式はどの保存形式でもJSONです。

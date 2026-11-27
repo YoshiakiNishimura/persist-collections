@@ -112,6 +112,24 @@ cargo run -- --format postcard records.postcard list
 
 Choose the format when creating a store and use the same selection when reopening it. The CLI prints `list` as JSON for every file format. Existing JSON files continue to work with the default commands.
 
+### How an insert is committed
+
+The CLI opens and validates the collection, then builds a one-use `insert_once` function over it. The function reuses `Records::insert` to allocate an ID and stage the row. `and_then` runs the selected backend's existing `save()` only after that succeeds. The CLI prints the ID after save succeeds.
+
+```mermaid
+flowchart TD
+    Open["Open and validate collection"] --> Insert["Call insert_once with record"]
+    Insert --> Prepare["Records::insert stages the row and allocates an ID"]
+    Prepare --> Prepared{"Preparation succeeded?"}
+    Prepared -->|Yes| Save["and_then: commit with the selected backend's save()"]
+    Prepared -->|No| Failure["Return error without printing an ID"]
+    Save --> Saved{"Save succeeded?"}
+    Saved -->|Yes| Success["Return and print the allocated ID"]
+    Saved -->|No| Failure
+```
+
+The function owns the staged state for this invocation. If save returns an error, the backend may already have applied the update. Reopen the store and inspect the records before retrying when the outcome is unclear.
+
 ## Share a snapshot through a local daemon
 
 On Linux, macOS, or WSL, start a daemon in one terminal. Use a new private directory on the local Unix filesystem:
