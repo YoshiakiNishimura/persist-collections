@@ -57,6 +57,50 @@ cargo run -- records.json list
 
 データには専用のパスを使ってください。CLIは同じパスに対する操作を `records.json.lock` のようなファイル上の協調ロックで調整します。別のツールやライブラリを直接使うコードには、独自の排他制御が必要です。ロックファイルは残しておき、ファイルロックをサポートするローカルのファイルシステムを使ってください。WSLで複数のコマンドを並行実行する場合は、データを `/mnt/c` の外にあるLinux側のファイルシステムに置いてください。
 
+### 関数のレイヤー
+
+矢印は呼び出し先を示します。通常の更新は `apply_once` が論理操作と確定処理をつなぎ、WAL再生は記録済みの変更を `apply` に直接渡します。
+
+```mermaid
+flowchart TD
+    subgraph CLI["CLIの操作"]
+        Insert["insert"]
+        Delete["delete"]
+        List["list"]
+    end
+
+    subgraph Upper["上位の操作"]
+        InsertOnce["insert_once"]
+        DeleteOnce["delete_once"]
+        ApplyOnce["apply_once"]
+    end
+
+    subgraph Logical["論理層"]
+        Prepare["prepare_insert"]
+        Apply["apply"]
+        Restrict["restrict"]
+    end
+
+    subgraph Storage["保存・復旧の戦略"]
+        Commit["選択した確定関数"]
+        Save["save() · スナップショットまたは常駐RAM"]
+        Append["WALへ追記・同期"]
+        Replay["WAL再生"]
+    end
+
+    Insert --> InsertOnce
+    Delete --> DeleteOnce
+    List -->|"全IDを選ぶ"| Restrict
+    InsertOnce --> Prepare
+    InsertOnce --> ApplyOnce
+    DeleteOnce --> ApplyOnce
+    ApplyOnce -->|"状態に適用"| Apply
+    ApplyOnce -->|"適用成功後に確定"| Commit
+    Commit --> Save
+    Commit --> Append
+    Replay -->|"記録済みの変更を適用"| Apply
+```
+
 ### insert の確定フロー
 
 論理層ではコレクションを「IDからレコードへの有限な部分関数」として扱い、次の採番IDも状態に持ちます。`restrict` は指定したID範囲に制限する操作で、`list` は全範囲を指定します。`apply` は変更を状態へ適用する操作で、通常の追加・削除とWAL再生が同じ関数を使います。採番は追加の準備で行い、適用時は指定されたIDを使います。

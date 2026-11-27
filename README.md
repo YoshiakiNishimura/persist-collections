@@ -114,6 +114,50 @@ cargo run -- --format postcard records.postcard list
 
 Choose the format when creating a store and use the same selection when reopening it. The CLI prints `list` as JSON for every file format. Existing JSON files continue to work with the default commands.
 
+### Function layers
+
+Each arrow points from a caller to the function it invokes. For a normal write, `apply_once` connects the logical operation to the selected commit function. WAL replay passes previously recorded changes directly to `apply`.
+
+```mermaid
+flowchart TD
+    subgraph CLI["CLI commands"]
+        Insert["insert"]
+        Delete["delete"]
+        List["list"]
+    end
+
+    subgraph Upper["Operation layer"]
+        InsertOnce["insert_once"]
+        DeleteOnce["delete_once"]
+        ApplyOnce["apply_once"]
+    end
+
+    subgraph Logical["Logical layer"]
+        Prepare["prepare_insert"]
+        Apply["apply"]
+        Restrict["restrict"]
+    end
+
+    subgraph Storage["Storage and recovery strategies"]
+        Commit["Selected commit function"]
+        Save["save() · snapshot or daemon memory"]
+        Append["Append and sync WAL"]
+        Replay["WAL replay"]
+    end
+
+    Insert --> InsertOnce
+    Delete --> DeleteOnce
+    List -->|"Select all IDs"| Restrict
+    InsertOnce --> Prepare
+    InsertOnce --> ApplyOnce
+    DeleteOnce --> ApplyOnce
+    ApplyOnce -->|"Apply to state"| Apply
+    ApplyOnce -->|"Commit after apply succeeds"| Commit
+    Commit --> Save
+    Commit --> Append
+    Replay -->|"Apply recorded change"| Apply
+```
+
 ### How an insert is committed
 
 The CLI models a collection as a finite partial function from IDs to records, with a separate next ID. `restrict` selects records in an ID interval and `list` uses the full interval. `apply` changes the state and is shared by normal writes and WAL replay. Insert preparation determines the ID, and `apply` uses that explicit ID without allocating another one.
