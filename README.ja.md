@@ -61,21 +61,21 @@ cargo run -- records.json list
 
 論理層ではコレクションを「IDからレコードへの有限な部分関数」として扱い、次の採番IDも状態に持ちます。`restrict` は指定したID範囲に制限する操作で、`list` は全範囲を指定します。`apply` は変更を状態へ適用する操作で、通常の追加・削除とWAL再生が同じ関数を使います。採番は追加の準備で行い、適用時は指定されたIDを使います。
 
-CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。追加の準備と適用が成功したときだけ `and_then` で変更と作業用の状態を確定関数に渡します。CLIは確定に成功してからIDを出力します。
+CLIはコレクションを開いて検証します。`insert_once` は採番済みの追加を準備し、`delete_once` は削除するIDを指定します。どちらも `apply_once` で作業用の状態に変更を適用し、選んだ確定関数につなぎます。適用に失敗した場合は確定関数を呼びません。追加時は、CLIが確定に成功してからIDを出力します。
 
 ```mermaid
 flowchart TD
-    Open["コレクションを開いて検証"] --> Insert["insert_once にレコードを渡す"]
-    Insert --> Prepare["IDを採番し、作業用の状態に変更を適用"]
-    Prepare --> Prepared{"追加の準備に成功？"}
-    Prepared -->|成功| Commit["and_then で採番済みレコード・次のID・状態を確定関数に渡す"]
-    Prepared -->|失敗| Failure["IDを出力せずエラーを返す"]
+    Open["コレクションを開いて検証"] --> Insert["採番済みの追加、またはID指定の削除を用意"]
+    Insert --> Prepare["apply_once で作業用の状態に変更を適用"]
+    Prepare --> Prepared{"変更の適用に成功？"}
+    Prepared -->|成功| Commit["and_then で適用した変更と作業用の状態を確定関数に渡す"]
+    Prepared -->|失敗| Failure["エラーを返す"]
     Commit --> Strategy{"選択した方式"}
     Strategy -->|スナップショット・常駐メモリ| Save["バックエンドの save() を呼ぶ"]
     Strategy -->|WAL| Log["変更ログを追記して同期"]
     Save --> Saved{"確定に成功？"}
     Log --> Saved
-    Saved -->|成功| Success["採番したIDを返して出力する"]
+    Saved -->|成功| Success["成功を返す。追加なら採番IDを出力"]
     Saved -->|失敗| Failure
 ```
 

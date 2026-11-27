@@ -6,7 +6,7 @@ use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
 };
-use records::{Change, Records};
+use records::{Applied, Change, Records};
 use std::{
     env, fmt,
     fs::{File, OpenOptions},
@@ -325,29 +325,39 @@ fn run_records<B>(
 }
 
 fn insert_once<B>(
-    mut state: Stored<Records, B>,
+    state: Stored<Records, B>,
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(String) -> io::Result<u64> {
     move |text| {
-        let prepared = state
-            .get()
-            .prepare_insert(text)
-            .and_then(|change| state.get_mut().apply(change));
-        prepared.and_then(|()| {
-            let records = state.get();
-            let inserted = records
-                .restrict(..)
-                .last()
-                .expect("successful insert appends a record");
-            let id = inserted.id;
-            let change = Change::Insert {
-                id,
-                text: inserted.text.as_str(),
-                next_id: records.next_id,
-            };
-            commit(change, &state).map(|()| id)
-        })
+        let change = state.get().prepare_insert(text)?;
+        apply_once(state, change, commit)
+            .map(|applied| applied.id())
+            .map_err(|error| match error {
+                ApplyOnceError::Apply(cause) | ApplyOnceError::Commit(cause) => cause,
+            })
     }
+}
+
+enum ApplyOnceError {
+    Apply(io::Error),
+    Commit(io::Error),
+}
+
+fn apply_once<B>(
+    mut state: Stored<Records, B>,
+    change: Change<String>,
+    commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
+) -> Result<Applied, ApplyOnceError> {
+    state
+        .get_mut()
+        .apply(change)
+        .map_err(ApplyOnceError::Apply)
+        .and_then(|applied| {
+            let change = state.get().applied_change(&applied);
+            commit(change, &state)
+                .map_err(ApplyOnceError::Commit)
+                .map(|()| applied)
+        })
 }
 
 fn commit_snapshot<B: Save<Records>>(
@@ -387,29 +397,21 @@ impl std::error::Error for DeleteProblem {
 }
 
 fn delete_once<B>(
-    mut state: Stored<Records, B>,
+    state: Stored<Records, B>,
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(u64) -> io::Result<()> {
     move |id| {
-        let prepared = state
-            .get_mut()
-            .apply(Change::Delete { id })
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
+        apply_once(state, Change::Delete { id }, commit)
+            .map(|_| ())
+            .map_err(|error| match error {
+                ApplyOnceError::Apply(cause) if cause.kind() == io::ErrorKind::NotFound => {
                     io::Error::new(io::ErrorKind::NotFound, DeleteProblem::NotFound(id))
-                } else {
-                    error
                 }
-            });
-        prepared.and_then(|()| {
-            commit(Change::Delete { id }, &state).map_err(|cause| {
-                if save_outcome_unknown(&cause) {
+                ApplyOnceError::Commit(cause) if save_outcome_unknown(&cause) => {
                     io::Error::other(DeleteProblem::OutcomeUnknown { id, cause })
-                } else {
-                    cause
                 }
+                ApplyOnceError::Apply(cause) | ApplyOnceError::Commit(cause) => cause,
             })
-        })
     }
 }
 

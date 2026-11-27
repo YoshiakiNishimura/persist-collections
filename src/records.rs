@@ -10,6 +10,19 @@ pub(super) enum Change<T> {
     Delete { id: u64 },
 }
 
+pub(super) enum Applied {
+    Insert { id: u64, position: usize },
+    Delete { id: u64 },
+}
+
+impl Applied {
+    pub(super) fn id(&self) -> u64 {
+        match self {
+            Self::Insert { id, .. } | Self::Delete { id } => *id,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(super) struct Record {
     pub(super) id: u64,
@@ -75,7 +88,7 @@ impl Records {
     }
 
     /// Apply an explicit change. Normal execution and WAL replay use this transition.
-    pub(super) fn apply(&mut self, change: Change<String>) -> io::Result<()> {
+    pub(super) fn apply(&mut self, change: Change<String>) -> io::Result<Applied> {
         match change {
             Change::Insert { id, text, next_id } => {
                 if id != self.next_id || id.checked_add(1) != Some(next_id) {
@@ -84,8 +97,10 @@ impl Records {
                         "invalid insert IDs",
                     ));
                 }
+                let position = self.records.len();
                 self.records.push(Record { id, text });
                 self.next_id = next_id;
+                Ok(Applied::Insert { id, position })
             }
             Change::Delete { id } => {
                 let position = self
@@ -98,9 +113,21 @@ impl Records {
                         )
                     })?;
                 self.records.remove(position);
+                Ok(Applied::Delete { id })
             }
         }
-        Ok(())
+    }
+
+    /// Borrow the change just applied to this state, before any further mutation.
+    pub(super) fn applied_change(&self, applied: &Applied) -> Change<&str> {
+        match *applied {
+            Applied::Insert { id, position } => Change::Insert {
+                id,
+                text: &self.records[position].text,
+                next_id: self.next_id,
+            },
+            Applied::Delete { id } => Change::Delete { id },
+        }
     }
 }
 
