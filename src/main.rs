@@ -3,7 +3,7 @@ use persist_collections::SnapshotFormat as BackendFormat;
 #[cfg(unix)]
 use persist_collections::daemon::DaemonFormat as BackendFormat;
 use persist_collections::{
-    Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SnapshotFormat, Stored,
+    Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SnapshotFormat, Stored, backup_once,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,7 +17,8 @@ use std::{
 const USAGE: &str = "Usage:
   persist-collections [--format <format>] <file> (insert <text> | list | delete <id> | backup <new-file> | restore <backup-file>)
   persist-collections daemon serve <socket>
-  persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id>)
+  persist-collections --backend daemon [--format <format>] <socket> (insert <text> | list | delete <id> | backup <new-file>)
+Backup and restore accept --backup-format <format> before the file or socket.
 Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 
 #[derive(Deserialize, Serialize)]
@@ -110,6 +111,20 @@ fn lock_snapshot(path: &Path) -> io::Result<File> {
     Ok(lock)
 }
 
+macro_rules! with_format {
+    ($format:expr, $operation:ident($($arg:expr),*)) => {
+        match $format {
+            "json" => $operation::<Json>($($arg),*),
+            "msgpack" => $operation::<MessagePack>($($arg),*),
+            "postcard" => $operation::<Postcard>($($arg),*),
+            "json-crc32" => $operation::<Checked<Json>>($($arg),*),
+            "msgpack-crc32" => $operation::<Checked<MessagePack>>($($arg),*),
+            "postcard-crc32" => $operation::<Checked<Postcard>>($($arg),*),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+        }
+    };
+}
+
 fn run() -> io::Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "--help" {
@@ -123,11 +138,15 @@ fn run() -> io::Result<()> {
         return serve_daemon(Path::new(socket));
     }
     let mut args = args.as_slice();
-    let mut format = Some("json");
+    let mut format = "json";
+    let mut backup_format = None;
     let mut backend = Backend::File;
     while let [flag, value, rest @ ..] = args {
         match flag.to_str() {
-            Some("--format") => format = value.to_str(),
+            Some("--format") => format = value.to_str().ok_or_else(usage_error)?,
+            Some("--backup-format") => {
+                backup_format = Some(value.to_str().ok_or_else(usage_error)?)
+            }
             Some("--backend") if value == "file" => backend = Backend::File,
             Some("--backend") if value == "daemon" => backend = Backend::Daemon,
             Some("--backend") => return Err(usage_error()),
@@ -166,27 +185,42 @@ fn run() -> io::Result<()> {
         _ => return Err(usage_error()),
     };
 
-    match format {
-        Some("json") => run_on::<Json>(backend, Path::new(path), command),
-        Some("msgpack") => run_on::<MessagePack>(backend, Path::new(path), command),
-        Some("postcard") => run_on::<Postcard>(backend, Path::new(path), command),
-        Some("json-crc32") => run_on::<Checked<Json>>(backend, Path::new(path), command),
-        Some("msgpack-crc32") => run_on::<Checked<MessagePack>>(backend, Path::new(path), command),
-        Some("postcard-crc32") => run_on::<Checked<Postcard>>(backend, Path::new(path), command),
-        _ => Err(usage_error()),
+    if backup_format.is_some() && !matches!(command, Command::Backup(_) | Command::Restore(_)) {
+        return Err(usage_error());
     }
+    with_format!(
+        format,
+        run_on(
+            backend,
+            Path::new(path),
+            command,
+            backup_format.unwrap_or(format)
+        )
+    )
 }
 
-fn run_on<F: BackendFormat>(backend: Backend, path: &Path, command: Command) -> io::Result<()> {
+fn run_on<F: BackendFormat>(
+    backend: Backend,
+    path: &Path,
+    command: Command,
+    backup_format: &str,
+) -> io::Result<()> {
     if matches!(backend, Backend::Daemon) {
         #[cfg(unix)]
-        return run_on_daemon::<F>(path, command);
+        return run_on_daemon::<F>(path, command, backup_format);
         #[cfg(not(unix))]
         return serve_daemon(path);
     }
     match command {
-        Command::Backup(destination) => return copy_snapshot::<F>(path, &destination),
-        Command::Restore(source) => return copy_snapshot::<F>(&source, path),
+        Command::Backup(destination) => {
+            return with_format!(
+                backup_format,
+                copy_records(|| read_records::<F>(path), &destination)
+            );
+        }
+        Command::Restore(source) => {
+            return copy_records::<F>(|| with_format!(backup_format, read_records(&source)), path);
+        }
         _ => {}
     }
     let snapshot = FileSnapshot::<F>::new(path)?;
@@ -219,12 +253,28 @@ fn serve_daemon(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn run_on_daemon<F: BackendFormat>(path: &Path, command: Command) -> io::Result<()> {
-    if matches!(command, Command::Backup(_) | Command::Restore(_)) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "backup and restore require the file backend",
-        ));
+fn run_on_daemon<F: BackendFormat>(
+    path: &Path,
+    command: Command,
+    backup_format: &str,
+) -> io::Result<()> {
+    match command {
+        Command::Backup(destination) => {
+            return with_format!(
+                backup_format,
+                copy_records(
+                    || persist_collections::DaemonSnapshot::<F>::read_value(path),
+                    &destination
+                )
+            );
+        }
+        Command::Restore(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "restore requires a new file destination",
+            ));
+        }
+        _ => {}
     }
     let state = persist_collections::DaemonSnapshot::<F>::open_value(path, Records::empty())?;
     run_records(state, command)
@@ -264,14 +314,20 @@ fn run_records<B: Save<Records>>(
     Ok(())
 }
 
-fn copy_snapshot<F: SnapshotFormat>(source: &Path, destination: &Path) -> io::Result<()> {
-    let records: Records = {
-        let _lock = lock_snapshot(source)?;
-        FileSnapshot::<F>::new(source)?.read_value()?
-    };
-    records.validate()?;
-    let _lock = lock_snapshot(destination)?;
-    FileSnapshot::<F>::new(destination)?.create_value(&records)
+fn read_records<F: SnapshotFormat>(source: &Path) -> io::Result<Records> {
+    let _lock = lock_snapshot(source)?;
+    FileSnapshot::<F>::new(source)?.read_value()
+}
+
+fn copy_records<F: SnapshotFormat>(
+    source: impl FnOnce() -> io::Result<Records>,
+    destination: &Path,
+) -> io::Result<()> {
+    backup_once(source, |records| {
+        records.validate()?;
+        let _lock = lock_snapshot(destination)?;
+        FileSnapshot::<F>::new(destination)?.create_value(records)
+    })
 }
 
 fn main() -> ExitCode {

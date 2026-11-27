@@ -136,6 +136,19 @@ pub trait Save<C> {
     fn save(&self, data: &C) -> io::Result<()>;
 }
 
+/// Capture one complete snapshot and write it to a backup destination.
+///
+/// The source provides a consistent snapshot. The destination defines how
+/// that snapshot is encoded and saved. The destination runs only after a
+/// successful read, so the source can release any lock before writing starts.
+pub fn backup_once<T>(
+    read_snapshot: impl FnOnce() -> io::Result<T>,
+    write_backup: impl FnOnce(&T) -> io::Result<()>,
+) -> io::Result<()> {
+    let snapshot = read_snapshot()?;
+    write_backup(&snapshot)
+}
+
 impl<C> Stored<C, Memory> {
     /// Wrap a collection without requiring serialization.
     pub fn memory(data: C) -> Self {

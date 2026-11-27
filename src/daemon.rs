@@ -130,6 +130,13 @@ impl<F: DaemonFormat> DaemonSnapshot<F> {
         ))
     }
 
+    /// Read the current snapshot and close the connection.
+    /// A daemon with no saved snapshot returns `NotFound`.
+    pub fn read_value<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Result<T> {
+        let (_, value) = Self::open(path.as_ref())?;
+        value.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "daemon has no saved snapshot"))
+    }
+
     fn open<T: DeserializeOwned>(path: &Path) -> io::Result<(Self, Option<T>)> {
         let mut stream = UnixStream::connect(path)?;
         let timeout = Some(Duration::from_secs(10));

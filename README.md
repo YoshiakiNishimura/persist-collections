@@ -135,7 +135,7 @@ A successful daemon save confirms that the snapshot reached the daemon's RAM. It
 
 Concurrent clients holding stale snapshots receive a conflict. Reopen and apply the intended change to the latest state. If the connection drops while saving, reopen and inspect the data before retrying. Each connection is tied to the daemon process that opened it, and the client never reconnects automatically. Idle sessions expire after 30 seconds. The daemon supports 16 active connections and snapshots up to 16 MiB.
 
-The socket is local to trusted clients with access to its directory. Stop the daemon with Ctrl+C. Before reusing the socket path, confirm the process has stopped and remove its leftover socket file, or choose a new path. The file backend supports the CLI backup and restore commands. Native Windows supports the file backend.
+The socket is local to trusted clients with access to its directory. Stop the daemon with Ctrl+C. Before reusing the socket path, confirm the process has stopped and remove its leftover socket file, or choose a new path. Native Windows supports the file backend.
 
 ## Recovery and backup
 
@@ -149,7 +149,17 @@ cargo run -- recovered.json restore backup.json
 cargo run -- recovered.json list
 ```
 
-Both commands lock and validate the source, then lock the destination and write the CLI records and next ID. The destination must be a new file, so choose a fresh filename each time. Restore preserves the records and next ID from the backup, so IDs issued after the backup may be reused in the recovered store. Keep backups on independent storage and retain the damaged file for diagnosis. Use the same `--format` for backup and restore as for normal operations. These commands copy records in one selected format. Tests include fixed snapshots for the original JSON, MessagePack, and Postcard layouts.
+Both commands capture and validate the records and next ID, then write them to a new destination file. File sources are locked while read, and the CLI locks the destination while writing. Restore preserves the records and next ID from the backup, so IDs issued after the backup may be reused in the recovered store. Keep backups on independent storage and retain the damaged file for diagnosis. Tests include fixed snapshots for the original JSON, MessagePack, and Postcard layouts.
+
+To back up a daemon using a different format, set `--format` to the live store's format and `--backup-format` to the archive's format. A daemon with no saved snapshot returns an error. For restore, `--format` selects the new file's format and `--backup-format` selects the archive's format. Omitting `--backup-format` uses the same format for both.
+
+```sh
+cargo run -- --backend daemon --format postcard --backup-format json-crc32 "$HOME/.persist-collections-demo/store.sock" backup backup.json
+cargo run -- --format msgpack --backup-format json-crc32 recovered.msgpack restore backup.json
+cargo run -- --format msgpack recovered.msgpack list
+```
+
+Rust callers can use the synchronous `backup_once(read_snapshot, write_backup)` with typed functions or closures. Pair `DaemonSnapshot::<F>::read_value` or `FileSnapshot::<F>::read_value` with `FileSnapshot::<G>::create_value` to copy a complete snapshot. Use the same record type to read and restore it. A caller can choose when to invoke it independently of `save()`. This API performs a full backup of a single captured state.
 
 ## Optional checksums
 

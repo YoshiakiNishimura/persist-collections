@@ -7,6 +7,7 @@
 ))]
 
 use persist_collections::{DaemonSnapshot, Json, MessagePack, daemon::DaemonSaveError};
+use persist_collections::{PostcardSnapshot, backup_once};
 use serde_json::{Value, json};
 use std::{
     fs, io,
@@ -170,5 +171,69 @@ fn large_fixed_arrays_round_trip_with_the_same_save_api() -> io::Result<()> {
         values.get()
     );
     assert!(DaemonSnapshot::<MessagePack>::open_array(&socket, [0_u32; 32]).is_err());
+    let archive = PostcardSnapshot::new(dir.path().join("array.postcard"))?;
+    backup_once(
+        || DaemonSnapshot::<MessagePack>::read_value::<Vec<u32>>(&socket),
+        |snapshot| archive.create_value(snapshot),
+    )?;
+    assert_eq!(archive.read_value::<Vec<u32>>()?, values.get().as_slice());
     Ok(())
+}
+
+#[test]
+fn daemon_backup_can_use_another_format_and_restore_after_shutdown() {
+    let dir = socket_dir();
+    let socket = dir.path().join("store.sock");
+    let archive = dir.path().join("backup.postcard");
+    let restored = dir.path().join("restored.msgpack");
+    let server = Server::start(&socket);
+    let backup = || {
+        cli()
+            .args(["--backend", "daemon", "--backup-format", "postcard-crc32"])
+            .arg(&socket)
+            .arg("backup")
+            .arg(&archive)
+            .output()
+            .unwrap()
+    };
+
+    assert!(!backup().status.success());
+    assert!(!archive.exists());
+    assert_eq!(success(&socket, "json", &["insert", "remove me"]), b"1\n");
+    assert_eq!(success(&socket, "json", &["insert", "keep me"]), b"2\n");
+    success(&socket, "json", &["delete", "1"]);
+    let created = backup();
+    assert!(created.status.success(), "{:?}", created);
+    let original = fs::read(&archive).unwrap();
+    assert!(!backup().status.success());
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    server.stop();
+
+    let output = cli()
+        .args(["--format", "msgpack", "--backup-format", "postcard-crc32"])
+        .arg(&restored)
+        .arg("restore")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let list = cli()
+        .args(["--format", "msgpack"])
+        .arg(&restored)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&list.stdout).unwrap(),
+        json!([{"id": 2, "text": "keep me"}])
+    );
+    let inserted = cli()
+        .args(["--format", "msgpack"])
+        .arg(&restored)
+        .args(["insert", "after restore"])
+        .output()
+        .unwrap();
+    assert!(inserted.status.success());
+    assert_eq!(inserted.stdout, b"3\n");
 }
