@@ -6,7 +6,7 @@ use persist_collections::{
     Checked, FileSnapshot, Json, MessagePack, Postcard, Save, SaveOutcomeUnknown, SnapshotFormat,
     Stored, backup_once,
 };
-use serde::{Deserialize, Serialize};
+use records::{Change, Records};
 use std::{
     env, fmt,
     fs::{File, OpenOptions},
@@ -15,6 +15,7 @@ use std::{
     process::ExitCode,
 };
 
+mod records;
 mod wal;
 
 const USAGE: &str = "Usage:
@@ -26,70 +27,6 @@ Backup and restore accept --backup-format <format> before the file or socket.
 Delete exit codes: 0 deleted, 2 record missing, 3 outcome unknown, 1 other error.
 Formats: json, msgpack, postcard, json-crc32, msgpack-crc32, postcard-crc32";
 
-#[derive(Deserialize, Serialize)]
-struct Record {
-    id: u64,
-    text: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct Records {
-    next_id: u64,
-    records: Vec<Record>,
-}
-
-impl Records {
-    fn empty() -> Self {
-        Self {
-            next_id: 1,
-            records: Vec::new(),
-        }
-    }
-
-    fn validate(&self) -> io::Result<()> {
-        let mut last_id = 0;
-        for record in &self.records {
-            if record.id <= last_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "record IDs must be strictly increasing",
-                ));
-            }
-            last_id = record.id;
-        }
-        if self.next_id <= last_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "next_id must exceed all record IDs",
-            ));
-        }
-        Ok(())
-    }
-
-    fn insert(&mut self, text: String) -> io::Result<u64> {
-        let id = self.next_id;
-        self.next_id = id
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("record IDs exhausted"))?;
-        self.records.push(Record { id, text });
-        Ok(id)
-    }
-
-    fn delete(&mut self, id: u64) -> io::Result<()> {
-        let position = self
-            .records
-            .binary_search_by_key(&id, |record| record.id)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("record {id} does not exist"),
-                )
-            })?;
-        self.records.remove(position);
-        Ok(())
-    }
-}
-
 enum Command {
     Insert(String),
     List,
@@ -97,12 +34,6 @@ enum Command {
     Backup(PathBuf),
     Restore(PathBuf),
     Checkpoint,
-}
-
-#[derive(Serialize, Deserialize)]
-enum Change<T> {
-    Insert { id: u64, text: T, next_id: u64 },
-    Delete { id: u64 },
 }
 
 #[derive(Clone, Copy)]
@@ -382,7 +313,7 @@ fn run_records<B>(
         }
         Command::List => {
             let mut stdout = io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &state.get().records)?;
+            serde_json::to_writer(&mut stdout, state.get().restrict(..))?;
             writeln!(stdout)?;
         }
         Command::Delete(id) => {
@@ -398,13 +329,17 @@ fn insert_once<B>(
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(String) -> io::Result<u64> {
     move |text| {
-        let prepared = state.get_mut().insert(text);
-        prepared.and_then(|id| {
+        let prepared = state
+            .get()
+            .prepare_insert(text)
+            .and_then(|change| state.get_mut().apply(change));
+        prepared.and_then(|()| {
             let records = state.get();
             let inserted = records
-                .records
+                .restrict(..)
                 .last()
                 .expect("successful insert appends a record");
+            let id = inserted.id;
             let change = Change::Insert {
                 id,
                 text: inserted.text.as_str(),
@@ -456,13 +391,16 @@ fn delete_once<B>(
     commit: impl for<'a> FnOnce(Change<&'a str>, &'a Stored<Records, B>) -> io::Result<()>,
 ) -> impl FnOnce(u64) -> io::Result<()> {
     move |id| {
-        let prepared = state.get_mut().delete(id).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                io::Error::new(io::ErrorKind::NotFound, DeleteProblem::NotFound(id))
-            } else {
-                error
-            }
-        });
+        let prepared = state
+            .get_mut()
+            .apply(Change::Delete { id })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(io::ErrorKind::NotFound, DeleteProblem::NotFound(id))
+                } else {
+                    error
+                }
+            });
         prepared.and_then(|()| {
             commit(Change::Delete { id }, &state).map_err(|cause| {
                 if save_outcome_unknown(&cause) {
@@ -539,7 +477,7 @@ mod tests {
         fn save(&self, records: &Records) -> io::Result<()> {
             self.0.set(self.0.get() + 1);
             assert_eq!(records.next_id, 2);
-            assert_eq!(records.records[0].id, 1);
+            assert_eq!(records.restrict(..)[0].id, 1);
             Err(io::Error::other("save failed"))
         }
     }
@@ -579,7 +517,10 @@ mod tests {
             assert_eq!(id, 1);
             assert_eq!(text, "note");
             assert_eq!(next_id, 2);
-            assert!(std::ptr::eq(text, staged.get().records[0].text.as_str()));
+            assert!(std::ptr::eq(
+                text,
+                staged.get().restrict(..)[0].text.as_str()
+            ));
             Ok(())
         });
         assert_eq!(insert("note".into()).unwrap(), 1);
@@ -594,10 +535,12 @@ mod tests {
         assert_eq!(command_error_status(&missing), ExitCode::from(2));
 
         let mut records = Records::empty();
-        records.insert("note".into()).unwrap();
+        records
+            .apply(records.prepare_insert("note".into()).unwrap())
+            .unwrap();
         let delete = delete_once(Stored::memory(records), |change, staged| {
             assert!(matches!(change, Change::Delete { id: 1 }));
-            assert!(staged.get().records.is_empty());
+            assert!(staged.get().restrict(..).is_empty());
             assert_eq!(staged.get().next_id, 2);
             Ok(())
         });
@@ -607,7 +550,9 @@ mod tests {
     #[test]
     fn delete_distinguishes_unknown_commit_from_an_ordinary_missing_file() {
         let mut records = Records::empty();
-        records.insert("note".into()).unwrap();
+        records
+            .apply(records.prepare_insert("note".into()).unwrap())
+            .unwrap();
         let delete = delete_once(Stored::memory(records), |_, _| {
             Err(io::Error::other(SaveOutcomeUnknown::new(io::Error::other(
                 "sync failed",
@@ -617,7 +562,9 @@ mod tests {
         assert_eq!(command_error_status(&unknown), ExitCode::from(3));
 
         let mut records = Records::empty();
-        records.insert("note".into()).unwrap();
+        records
+            .apply(records.prepare_insert("note".into()).unwrap())
+            .unwrap();
         let delete = delete_once(Stored::memory(records), |_, _| {
             Err(io::Error::new(
                 io::ErrorKind::NotFound,

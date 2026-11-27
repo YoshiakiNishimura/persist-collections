@@ -59,12 +59,14 @@ cargo run -- records.json list
 
 ### insert の確定フロー
 
-CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。既存の `Records::insert` で行を追加してIDを採番し、成功したときだけ `and_then` で変更と準備した状態を確定関数に渡します。CLIは確定に成功してからIDを出力します。
+論理層ではコレクションを「IDからレコードへの有限な部分関数」として扱い、次の採番IDも状態に持ちます。`restrict` は指定したID範囲に制限する操作で、`list` は全範囲を指定します。`apply` は変更を状態へ適用する操作で、通常の追加・削除とWAL再生が同じ関数を使います。採番は追加の準備で行い、適用時は指定されたIDを使います。
+
+CLIはコレクションを開いて検証し、その状態と確定関数を組み合わせて1回呼び出し用の `insert_once` を作ります。追加の準備と適用が成功したときだけ `and_then` で変更と作業用の状態を確定関数に渡します。CLIは確定に成功してからIDを出力します。
 
 ```mermaid
 flowchart TD
     Open["コレクションを開いて検証"] --> Insert["insert_once にレコードを渡す"]
-    Insert --> Prepare["Records::insert で追加を準備し、IDを採番"]
+    Insert --> Prepare["IDを採番し、作業用の状態に変更を適用"]
     Prepare --> Prepared{"追加の準備に成功？"}
     Prepared -->|成功| Commit["and_then で採番済みレコード・次のID・状態を確定関数に渡す"]
     Prepared -->|失敗| Failure["IDを出力せずエラーを返す"]

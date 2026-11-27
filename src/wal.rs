@@ -213,20 +213,9 @@ fn replay<F: SnapshotFormat>(
             if sequence.checked_add(1) != Some(entry.sequence) {
                 return Err(invalid("WAL sequence gap after checkpoint"));
             }
-            match entry.change {
-                Change::Insert { id, text, next_id } => {
-                    if records.next_id != id || id.checked_add(1) != Some(next_id) {
-                        return Err(invalid("invalid WAL insert IDs"));
-                    }
-                    records.records.push(super::Record { id, text });
-                    records.next_id = next_id;
-                }
-                Change::Delete { id } => {
-                    records
-                        .delete(id)
-                        .map_err(|_| invalid("WAL delete refers to a missing record"))?;
-                }
-            }
+            records
+                .apply(entry.change)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             *sequence = entry.sequence;
         }
         previous = Some(entry.sequence);

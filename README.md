@@ -116,12 +116,14 @@ Choose the format when creating a store and use the same selection when reopenin
 
 ### How an insert is committed
 
-The CLI opens and validates the collection, then builds a one-use `insert_once` function with a commit function. The function reuses `Records::insert` to allocate an ID and stage the row. After staging succeeds, `and_then` passes the change and staged state to the commit function. The CLI prints the ID after commit succeeds.
+The CLI models a collection as a finite partial function from IDs to records, with a separate next ID. `restrict` selects records in an ID interval and `list` uses the full interval. `apply` changes the state and is shared by normal writes and WAL replay. Insert preparation determines the ID, and `apply` uses that explicit ID without allocating another one.
+
+The CLI opens and validates the collection, then builds a one-use `insert_once` function with a commit function. After preparing and applying the change to the staged state, `and_then` passes both to the commit function. The CLI prints the ID after commit succeeds.
 
 ```mermaid
 flowchart TD
     Open["Open and validate collection"] --> Insert["Call insert_once with record"]
-    Insert --> Prepare["Records::insert stages the row and allocates an ID"]
+    Insert --> Prepare["Prepare the assigned ID and apply the change to staged state"]
     Prepare --> Prepared{"Preparation succeeded?"}
     Prepared -->|Yes| Commit["and_then: pass the inserted record, next ID, and staged state to commit"]
     Prepared -->|No| Failure["Return error without printing an ID"]
