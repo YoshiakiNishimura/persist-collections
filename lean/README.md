@@ -10,7 +10,8 @@ LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusTree.olean" BPlusTree.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusUpdate.olean" BPlusUpdate.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowRecovery.olean" CowRecovery.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowHistory.olean" CowHistory.lean
-LEAN_PATH="$check_dir" lean CowReclaim.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/CowReclaim.olean" CowReclaim.lean
+LEAN_PATH="$check_dir" lean CowReuse.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -168,3 +169,38 @@ selected slots. The Rust file currently stores variable-length records, so
 implementing hole punching would require checking that each reclaimed
 filesystem block overlaps only dead records. Physical hole punching, slot
 reuse, and moving compaction are outside this model.
+
+## Reusing reclaimed slots
+
+`CowReuse.lean` extends the reclamation model with reservations and writes
+to existing empty slots. Reservations are checked against the current file
+and the union of the confirmed and uncertain candidate roots while holding
+the store lock. Each address is reserved once in a batch. A crash or a
+publication ends that reservation. A later batch checks the current
+candidate set again.
+
+An interrupted overwrite can leave arbitrary contents in the reserved
+slots and an unreferenced append tail. Existing candidates keep their
+complete views. The new manifest can become a recovery candidate only
+after its entire page image is synced and can be opened. Its tree may
+share live pages, use written reservations, or use freshly appended pages.
+The previous candidates remain live until directory confirmation. Recovery
+uses the manifest and its links, so bytes in unreferenced slots cannot
+publish a tree.
+
+Placement retains the existing backward-link rule. A branch must occupy
+an address above all its children, so an early hole may fit a leaf while
+the parent must be appended later. The model uses fixed logical slot
+addresses and assumes each overwrite or torn write affects only its
+reserved slots. Actual Rust page reuse, byte-level allocation and storage
+alignment, and readers that hold roots outside the store lock are outside
+the proof.
+
+| Theorem | Guarantee |
+| --- | --- |
+| `Reservation.excludes_reachable` | No page reachable from any recovery candidate can be reserved |
+| `writeSlots_written` | Each uniquely reserved write lands in the requested existing slot |
+| `Reservation.preserves` | Even a torn overwrite leaves all previously published views readable |
+| `restart_during_overwrite` | A crash before publication can only reopen one of the previous complete views |
+| `Reuse.preserves` | Publishing the synced image protects the new candidate along with the old candidates |
+| `restart_after_reuse_trace` | Interleaving reuse, updates, reclaim, and restarts yields complete views at or above the confirmed floor |

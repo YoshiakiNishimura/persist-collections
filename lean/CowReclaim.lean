@@ -140,12 +140,12 @@ theorem reclaimable_unmarked (depth : Nat) (s : History) (file : PageFile)
   simp only [Bool.and_eq_true, Bool.not_eq_true', List.contains_eq_mem] at marked
   simpa using marked.1
 
-theorem reclaimable_excludes_reachable (depth : Nat) (codec : String) (s : History)
+theorem candidate_reachable_live (depth : Nat) (codec : String) (s : History)
     (file : PageFile) (pages : s.pages = some file) (valid : s.Valid depth codec)
     (v : Generation) (candidate : v ∈ s.candidates) (link : Link)
     (root : v.view.manifest.tree = some link)
     (reached : Reachable (file.take v.view.manifest.endPos) link.2 addr) :
-    addr ∉ reclaimable depth s file := by
+    addr ∈ liveAddresses depth s file := by
   have read := (valid.2 v candidate).2.2
   rw [pages] at read
   obtain ⟨tree, found⟩ : ∃ tree, readTree (file.take v.view.manifest.endPos) depth link = some tree := by
@@ -155,9 +155,17 @@ theorem reclaimable_excludes_reachable (depth : Nat) (codec : String) (s : Histo
   have marked : addr ∈ markManifest depth file v.view.manifest := by
     simpa [markManifest, root] using
       reachable_marked (file.take v.view.manifest.endPos) depth link tree found reached
+  exact List.mem_flatMap.mpr ⟨v, candidate, marked⟩
+
+theorem reclaimable_excludes_reachable (depth : Nat) (codec : String) (s : History)
+    (file : PageFile) (pages : s.pages = some file) (valid : s.Valid depth codec)
+    (v : Generation) (candidate : v ∈ s.candidates) (link : Link)
+    (root : v.view.manifest.tree = some link)
+    (reached : Reachable (file.take v.view.manifest.endPos) link.2 addr) :
+    addr ∉ reclaimable depth s file := by
   intro chosen
   exact reclaimable_unmarked depth s file addr chosen
-    (List.mem_flatMap.mpr ⟨v, candidate, marked⟩)
+    (candidate_reachable_live depth codec s file pages valid v candidate link root reached)
 
 /-- A completed reclamation leaves holes and retains physical slot numbers. -/
 def clearSlots (targets : List Address) (file : PageFile) : PageFile :=
