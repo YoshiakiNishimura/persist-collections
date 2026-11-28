@@ -7,7 +7,8 @@ From this directory, check the models with the Lean 4.19.0 toolchain in
 check_dir=$(mktemp -d)
 LEAN_PATH="$check_dir" lean -o "$check_dir/Model.olean" Model.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusTree.olean" BPlusTree.lean
-LEAN_PATH="$check_dir" lean BPlusUpdate.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusUpdate.olean" BPlusUpdate.lean
+LEAN_PATH="$check_dir" lean CowRecovery.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -65,3 +66,42 @@ The update proof concerns the in-memory page model and the ordering and fence
 invariants. It abstracts Rust's leaf binary search as a sorted-list operation.
 It does not verify storage writes, publication, crash recovery, or page
 occupancy bounds.
+
+## Copy-on-write publication and recovery
+
+`CowRecovery.lean` models the publication protocol in
+[`src/cow_btree.rs`](../src/cow_btree.rs). New page records append at the
+actual tail, past any unreferenced records left by an earlier attempt. Branch
+links can reuse older pages and must point backward in the file. The manifest
+publishes the root link, end position, allocation counter, version, and codec
+together. A reader uses only that manifest's file prefix.
+
+| Interruption point | Manifest that may survive |
+| --- | --- |
+| Append, page-file sync, or sync of the new page-file name | Old |
+| Write and sync the temporary manifest | Old |
+| Atomically replace the manifest, before the directory sync is confirmed | Old or new |
+| Final directory sync has returned successfully | New |
+
+A fresh store first publishes an empty manifest. On Unix, the first update
+makes the new page-file name durable before replacing that manifest.
+Synchronizing only the page file would leave open the case where a surviving
+manifest names a tree in a missing page file.
+[Linux `fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html)
+
+| Theorem | Guarantee |
+| --- | --- |
+| `reopen_prefix` | Extending a durable file prefix cannot change the view read through its manifest |
+| `crash_reopens_whole_version` | Every modeled interruption yields the complete old or new view, including its manifest and reachable tree |
+| `confirmed_reopens_new` | After the final directory sync, only the new view can reopen |
+| `bootstrap_reopens_empty` | Interruption during initial empty-manifest creation still exposes an empty store |
+| `crash_after_update` | The same recovery result applies to the logical insert/delete model when the staged page image represents its result |
+
+The theorem starts from one durable old manifest and a complete staged image
+of the proposed new tree. It assumes a single writer, crash-atomic manifest
+replacement, effective file and directory syncs, and preservation of already
+durable bytes during append. The model uses decoded page records in place of
+byte offsets and codecs. The proof covers one publication attempt with these
+filesystem guarantees. Device corruption, recovery followed by another
+commit on an unconfirmed manifest, and non-Unix power-loss behavior are
+outside its scope.

@@ -157,6 +157,12 @@ impl<'a, F: SnapshotFormat> Tree<'a, F> {
 
     fn publish(mut self, pages: Pages<F>, tree: Option<Link<u64, u64>>) -> io::Result<()> {
         pages.file.sync_all()?;
+        // The first commit can create pages. Its name must survive before the
+        // manifest can begin to reference it, even if the final sync is interrupted.
+        #[cfg(unix)]
+        if self.root.end == 0 {
+            File::open(self.directory)?.sync_all()?;
+        }
         self.root.tree = tree;
         self.root.end = pages.tail;
         // The new root becomes visible only after all new pages have been synced.
