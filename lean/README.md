@@ -1,12 +1,13 @@
 # Lean model
 
-From this directory, check both models with the Lean 4.19.0 toolchain in
+From this directory, check the models with the Lean 4.19.0 toolchain in
 `lean-toolchain` (POSIX shell). The models need no Mathlib.
 
 ```sh
 check_dir=$(mktemp -d)
 LEAN_PATH="$check_dir" lean -o "$check_dir/Model.olean" Model.lean
-LEAN_PATH="$check_dir" lean BPlusTree.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusTree.olean" BPlusTree.lean
+LEAN_PATH="$check_dir" lean BPlusUpdate.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -44,3 +45,23 @@ child's keys lying at or above its own fence and below later fences. The model
 holds the root fixed for the scan and assumes successful page reads and row
 emission. Rust page updates, root publication, I/O failures, and corruption
 handling are outside the proof.
+
+`BPlusUpdate.lean` models successful updates to the same page type. It inserts
+at the sorted leaf position, rejects duplicate IDs, and splits a leaf or branch
+at the midpoint when it grows past 16 entries. Deletion removes a matching
+row, discards pages that become empty, and collapses a singleton root branch
+once. Surviving and newly split pages carry the exact first ID as their fence.
+The model uses the depth of the resulting root, including after a root split or
+collapse.
+
+| Theorem | Guarantee |
+| --- | --- |
+| `editChildren_eq_partition` | An update rewrites the child selected by Rust's predecessor slot |
+| `exact_valid` | Exact fences and ordered rows imply the earlier scan invariant |
+| `updateRoot_spec` | A successful insert or delete preserves strict ID order and exact fences and changes only the requested row |
+| `scan_after_update` | The earlier range scan is complete and strictly ID-ordered on the new root |
+
+The update proof concerns the in-memory page model and the ordering and fence
+invariants. It abstracts Rust's leaf binary search as a sorted-list operation.
+It does not verify storage writes, publication, crash recovery, or page
+occupancy bounds.
