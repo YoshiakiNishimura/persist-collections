@@ -24,7 +24,7 @@ inductive Reachable (file : PageFile) : Address → Address → Prop where
       (decoded : file[parent]?.join = some (.branch links)) (member : child ∈ links)
       (below : Reachable file child.2 address) : Reachable file parent address
 
-private theorem mapM_success_at (f : α → Option β) (xs : List α) (x : α)
+theorem mapM_success_at (f : α → Option β) (xs : List α) (x : α)
     (member : x ∈ xs) (done : ∃ ys, xs.mapM f = some ys) : ∃ y, f x = some y := by
   induction xs with
   | nil => simp at member
@@ -71,7 +71,7 @@ theorem reachable_marked (file : PageFile) (depth : Nat) (link : Link) (tree : P
         simp only [markTree, decoded, List.mem_cons]
         exact Or.inr (List.mem_flatMap.mpr ⟨child, member, marked⟩)
 
-private theorem mapM_agree (f g : α → Option β) (xs : List α)
+theorem mapM_agree (f g : α → Option β) (xs : List α)
     (same : ∀ x ∈ xs, f x = g x) : xs.mapM f = xs.mapM g := by
   induction xs with
   | nil => rfl

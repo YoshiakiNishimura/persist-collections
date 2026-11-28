@@ -11,7 +11,8 @@ LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusUpdate.olean" BPlusUpdate.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowRecovery.olean" CowRecovery.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowHistory.olean" CowHistory.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowReclaim.olean" CowReclaim.lean
-LEAN_PATH="$check_dir" lean CowReuse.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/CowReuse.olean" CowReuse.lean
+LEAN_PATH="$check_dir" lean CowCompact.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -204,3 +205,37 @@ the proof.
 | `restart_during_overwrite` | A crash before publication can only reopen one of the previous complete views |
 | `Reuse.preserves` | Publishing the synced image protects the new candidate along with the old candidates |
 | `restart_after_reuse_trace` | Interleaving reuse, updates, reclaim, and restarts yields complete views at or above the confirmed floor |
+
+## Moving compaction
+
+`CowCompact.lean` copies the union of pages reachable from the confirmed
+and uncertain recovery candidates into a separate file. It copies a shared
+page once. Every retained address moves to the number of retained slots
+before it, preserving strict backward links. Each manifest's root address
+and published end are remapped. The full logical tree, record ID allocator,
+codec, format version, and history generations are preserved.
+
+The catalog couples the file identity to all manifests of its layout. The
+writer syncs the new file and its directory entry, syncs a temporary catalog,
+then atomically replaces the visible catalog. The old file remains available
+until a subsequent directory sync makes the switch durable.
+
+| Crash cut | Layout that may reopen |
+| --- | --- |
+| Copying or syncing the new file or temporary catalog | Old |
+| Catalog replacement before its directory sync is confirmed | Old or compacted |
+| Successful directory sync, including interruption during old-file cleanup | Compacted |
+
+| Theorem | Guarantee |
+| --- | --- |
+| `compact_shrinks` | Omitting any unmarked in-bounds slot strictly reduces the slot count |
+| `readTree_relocated` | Rewriting addresses and copying records preserves a successful tree read |
+| `compact_candidate`, `compact_history_valid` | Every relocated candidate opens with the same tree and the compacted history satisfies the existing invariant |
+| `compact_crash_candidate`, `restart_during_compaction` | Every candidate remains readable with the same logical contents at any modeled crash cut, and recovery stays at or above the confirmed floor |
+
+The model starts with readable candidates and freezes the candidate set
+under the store lock throughout the switch. File identities are distinct
+within an attempt. The proof assumes syncs persist the relevant contents
+and names and that catalog replacement is crash-atomic. It abstracts byte
+offsets, checksums, and physical disk allocation as logical slots. The Rust
+implementation does not yet have this catalog or moving compaction.
