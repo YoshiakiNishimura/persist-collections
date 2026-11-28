@@ -9,7 +9,8 @@ LEAN_PATH="$check_dir" lean -o "$check_dir/Model.olean" Model.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusTree.olean" BPlusTree.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusUpdate.olean" BPlusUpdate.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/CowRecovery.olean" CowRecovery.lean
-LEAN_PATH="$check_dir" lean CowHistory.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/CowHistory.olean" CowHistory.lean
+LEAN_PATH="$check_dir" lean CowReclaim.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -138,3 +139,32 @@ loss. This is an assumption about filesystem recovery, and the proof does not
 depend on a particular ordering of unconfirmed renames. Page reuse, compaction
 that moves or overwrites pages, and filesystems that violate those guarantees
 are outside the model.
+
+## Reclaiming unreachable pages
+
+`CowReclaim.lean` marks the pages reachable from the confirmed manifest and
+every manifest still eligible for recovery. Each tree is marked within the
+file prefix published by its own manifest. Shared pages count as live if
+any candidate references them, regardless of which root is visible.
+
+The planner selects occupied, unmarked slots. Reclaim keeps the file length
+and every slot address fixed. A crash may leave the old contents, a hole,
+or unusable contents in any selected slot. Reopening reads the selected
+manifest and follows its links, so it never discovers a root by scanning
+unreferenced slots.
+
+| Theorem | Guarantee |
+| --- | --- |
+| `reachable_marked` | Every page reachable through a readable root is marked |
+| `reclaimable_excludes_reachable` | No candidate's reachable page can be selected for reclaim |
+| `reclaim_preserves_candidate` | Even an interrupted reclaim leaves every candidate's complete view unchanged |
+| `restart_after_reclaim_trace` | With updates, reclaims, and restarts interleaved, recovery still reads a complete view at or above the confirmed floor |
+
+The model treats marking and reclaiming as one operation under the store lock.
+Candidate roots are discarded only after directory confirmation. Readers
+holding roots outside that lock would need to pin those roots as additional
+marking inputs. The proof requires a storage primitive that changes only the
+selected slots. The Rust file currently stores variable-length records, so
+implementing hole punching would require checking that each reclaimed
+filesystem block overlaps only dead records. Physical hole punching, slot
+reuse, and moving compaction are outside this model.
