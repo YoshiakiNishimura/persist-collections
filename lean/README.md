@@ -8,7 +8,8 @@ check_dir=$(mktemp -d)
 LEAN_PATH="$check_dir" lean -o "$check_dir/Model.olean" Model.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusTree.olean" BPlusTree.lean
 LEAN_PATH="$check_dir" lean -o "$check_dir/BPlusUpdate.olean" BPlusUpdate.lean
-LEAN_PATH="$check_dir" lean CowRecovery.lean
+LEAN_PATH="$check_dir" lean -o "$check_dir/CowRecovery.olean" CowRecovery.lean
+LEAN_PATH="$check_dir" lean CowHistory.lean
 ```
 
 The state consists of rows in strictly ascending ID order and the next ID to
@@ -105,3 +106,35 @@ byte offsets and codecs. The proof covers one publication attempt with these
 filesystem guarantees. Device corruption, recovery followed by another
 commit on an unconfirmed manifest, and non-Unix power-loss behavior are
 outside its scope.
+
+## Repeated updates and restarts
+
+`CowHistory.lean` starts with the durable empty manifest from the bootstrap
+model and covers any finite sequence of page appends, manifest renames,
+directory confirmations, process restarts, and power recoveries. It tracks the
+last confirmed version separately from the currently visible version.
+Generations are proof labels and are independent of record IDs and of the
+on-disk format.
+
+After an unconfirmed rename, a process restart reads the currently visible
+manifest. A later power recovery may select any complete candidate published
+since the last confirmed directory sync, including the confirmed version
+itself. Merely reading a manifest after reboot leaves the set of candidates
+unchanged. A successful directory confirmation makes the visible version the
+new floor and the only candidate at that instant.
+
+| Theorem | Guarantee |
+| --- | --- |
+| `Step.preserves` | Every possible manifest still opens its complete tree after each step, and the confirmed floor can only advance |
+| `Trace.preserves` | The invariant and the confirmed floor hold across arbitrarily many steps |
+| `restart_after_trace` | Recovery exposes one complete version at or above every earlier confirmed generation. Recovery at the confirmed generation yields exactly the confirmed view |
+| `restart_from_empty` | The same result holds for histories beginning at the durable empty manifest |
+
+Candidates share a durable append-only file, so older manifests retain every
+page they can reference. The proof uses the single-attempt filesystem
+assumptions above and a conservative recovery rule for multiple renames.
+Between directory confirmations, any complete candidate can survive a power
+loss. This is an assumption about filesystem recovery, and the proof does not
+depend on a particular ordering of unconfirmed renames. Page reuse, compaction
+that moves or overwrites pages, and filesystems that violate those guarantees
+are outside the model.
