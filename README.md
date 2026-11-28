@@ -301,6 +301,8 @@ fn main() -> std::io::Result<()> {
 
 The CLI `query <text> [<first-id> <last-id>]` matches exact text. The optional inclusive ID interval is composed with the text condition. A B+ tree uses the interval to start the read and checks the text only on the candidates it visits. A text-only query traverses the whole collection.
 
+The [Lean 4 model](lean/README.md) proves ordered result equivalence for predicate composition and ID range pruning.
+
 ## Share a snapshot through a local daemon
 
 On Linux, macOS, or WSL, start a daemon in one terminal. Use a new private directory on the local Unix filesystem:
